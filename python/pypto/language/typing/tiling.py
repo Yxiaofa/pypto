@@ -9,6 +9,8 @@
 
 """Tiling class utilities for PyPTO Language DSL."""
 
+from dataclasses import dataclass
+
 from pypto.pypto_core import DataType
 
 _PYTHON_TYPE_TO_DTYPE: dict[type, DataType] = {
@@ -18,11 +20,58 @@ _PYTHON_TYPE_TO_DTYPE: dict[type, DataType] = {
 }
 
 
+@dataclass(frozen=True)
+class _ArrayAlias:
+    """Internal: stores dtype and size for an Array[T, N] annotation."""
+
+    dtype: type  # int, float, or bool
+    size: int
+
+
+class Array:
+    """Fixed-length homogeneous array type for tiling class fields.
+
+    Usage:
+        offsets: Array[int, 4]    # 4 × INT32 params
+        scales: Array[float, 2]   # 2 × FP32 params
+    """
+
+    def __class_getitem__(cls, args: tuple[type, int]) -> _ArrayAlias:
+        dtype, size = args
+        if dtype not in _PYTHON_TYPE_TO_DTYPE:
+            raise TypeError(f"Array element type must be int, float, or bool, got {dtype!r}")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ValueError(f"Array size must be a positive integer, got {size!r}")
+        return _ArrayAlias(dtype=dtype, size=size)
+
+
+@dataclass(frozen=True)
+class ScalarFieldInfo:
+    """Field info for a scalar tiling field (int, float, or bool)."""
+
+    dtype: DataType
+
+
+@dataclass(frozen=True)
+class ArrayFieldInfo:
+    """Field info for a fixed-length array tiling field (Array[T, N])."""
+
+    dtype: DataType
+    size: int
+
+
+FieldInfo = ScalarFieldInfo | ArrayFieldInfo
+
+
+def _is_valid_field_annotation(ann: object) -> bool:
+    return ann in _PYTHON_TYPE_TO_DTYPE or isinstance(ann, _ArrayAlias)
+
+
 def is_tiling_class(cls: object) -> bool:
     """Return True if cls is a user-defined tiling class.
 
     A tiling class is a plain Python class with at least one field,
-    all annotated as int, float, or bool.
+    all annotated as int, float, bool, or Array[T, N].
 
     Args:
         cls: Object to check
@@ -35,24 +84,33 @@ def is_tiling_class(cls: object) -> bool:
     annotations = getattr(cls, "__annotations__", {})
     if not annotations:
         return False
-    return all(v in _PYTHON_TYPE_TO_DTYPE for v in annotations.values())
+    return all(_is_valid_field_annotation(v) for v in annotations.values())
 
 
-def get_tiling_fields(cls: type) -> dict[str, DataType]:
-    """Return ordered {field_name: DataType} for a validated tiling class.
+def get_tiling_fields(cls: type) -> dict[str, FieldInfo]:
+    """Return ordered {field_name: FieldInfo} for a validated tiling class.
 
     Args:
         cls: A tiling class (validated by is_tiling_class)
 
     Returns:
-        Ordered dict mapping field names to their DataType
+        Ordered dict mapping field names to their FieldInfo (ScalarFieldInfo or ArrayFieldInfo)
 
     Raises:
         ValueError: If cls is not a valid tiling class
     """
     if not is_tiling_class(cls):
-        raise ValueError(f"Not a valid tiling class: {cls!r}. All fields must be annotated as int, float, or bool.")
-    return {name: _PYTHON_TYPE_TO_DTYPE[py_type] for name, py_type in cls.__annotations__.items()}
+        raise ValueError(
+            f"Not a valid tiling class: {cls!r}. All fields must be annotated as "
+            "int, float, bool, or Array[T, N]."
+        )
+    result: dict[str, FieldInfo] = {}
+    for name, ann in cls.__annotations__.items():
+        if ann in _PYTHON_TYPE_TO_DTYPE:
+            result[name] = ScalarFieldInfo(dtype=_PYTHON_TYPE_TO_DTYPE[ann])
+        else:  # _ArrayAlias
+            result[name] = ArrayFieldInfo(dtype=_PYTHON_TYPE_TO_DTYPE[ann.dtype], size=ann.size)
+    return result
 
 
-__all__ = ["is_tiling_class", "get_tiling_fields"]
+__all__ = ["is_tiling_class", "get_tiling_fields", "Array", "ScalarFieldInfo", "ArrayFieldInfo", "FieldInfo"]

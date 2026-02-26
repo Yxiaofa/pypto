@@ -305,32 +305,45 @@ def kernel(
 
 ### Tiling Parameters
 
-A **tiling parameter** groups related scalar configuration values (loop bounds, offsets, etc.) into a named struct. Define a plain Python class with `int`, `float`, or `bool` field annotations:
+A **tiling parameter** groups related scalar configuration values (loop bounds, offsets, etc.) into a named struct. Define a plain Python class with `int`, `float`, `bool`, or `Array[T, N]` field annotations:
 
 ```python
+from pypto.language.typing.tiling import Array
+
 class Tiling:
-    m: int     # → Scalar[INT32]
-    n: int     # → Scalar[INT32]
-    scale: float  # → Scalar[FP32]
+    m: int              # → Scalar[INT32]
+    n: int              # → Scalar[INT32]
+    scale: float        # → Scalar[FP32]
+    offsets: Array[int, 3]   # → 3 × Scalar[INT32]
 ```
 
-When used as a function parameter, each field is flattened to an individual scalar IR param named `{param}_{field}`:
+When used as a function parameter, each field is flattened to individual scalar IR params:
+
+- Scalar fields: `{param}_{field}` (e.g., `tiling_n`)
+- Array fields: `{param}_{field}_{i}` for each index (e.g., `tiling_offsets_0`, `tiling_offsets_1`, `tiling_offsets_2`)
 
 ```python
+import pypto.language as pl
+from pypto.language.typing.tiling import Array
+
 @pl.function
 def kernel(
     x: pl.Tensor[[64], pl.FP32],
-    tiling: Tiling,              # flattened to tiling_m, tiling_n, tiling_scale
-) -> pl.Tensor[[64], pl.FP32]:
-    n: pl.Scalar[pl.INT32] = tiling.n   # resolves to tiling_n IR var
-    return x
+    tiling: Tiling,   # flattened to tiling_m, tiling_n, tiling_scale,
+                      #   tiling_offsets_0, tiling_offsets_1, tiling_offsets_2
+) -> pl.Scalar[pl.INT32]:
+    n: pl.Scalar[pl.INT32] = tiling.n            # resolves to tiling_n IR var
+    off: pl.Scalar[pl.INT32] = tiling.offsets[1] # resolves to tiling_offsets_1 IR var
+    return off
 ```
 
 **Constraints:**
 
 - At most **one** tiling parameter per function
 - The tiling parameter must be the **last** parameter
-- Only `int` (→ `INT32`), `float` (→ `FP32`), and `bool` (→ `BOOL`) field types are supported
+- Scalar field types: `int` (→ `INT32`), `float` (→ `FP32`), `bool` (→ `BOOL`)
+- Array field type: `Array[T, N]` where `T` is `int`/`float`/`bool` and `N` is a positive integer
+- Array subscript index must be a **literal integer** (no dynamic indexing)
 
 ## Complete Example
 

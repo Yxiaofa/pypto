@@ -27,7 +27,7 @@ from .expr_evaluator import ExprEvaluator
 from .scope_manager import ScopeManager
 from .span_tracker import SpanTracker
 from .type_resolver import TypeResolver
-from ..typing.tiling import get_tiling_fields, is_tiling_class
+from ..typing.tiling import ArrayFieldInfo, ScalarFieldInfo, get_tiling_fields, is_tiling_class
 
 if TYPE_CHECKING:
     from .decorator import InlineFunction
@@ -107,8 +107,9 @@ class ASTParser:
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
 
-        # Registry mapping tiling param names to their flattened field vars
-        self.tiling_registry: dict[str, dict[str, ir.Var]] = {}
+        # Registry mapping tiling param names to their flattened field vars.
+        # Scalar fields map to a single ir.Var; array fields map to list[ir.Var].
+        self.tiling_registry: dict[str, dict[str, ir.Var | list[ir.Var]]] = {}
 
     def parse_function(
         self,
@@ -176,11 +177,19 @@ class ASTParser:
                 tiling_cls = self._resolve_tiling_class(arg.annotation)
                 if tiling_cls is not None:
                     param_span = self.span_tracker.get_span(arg)
-                    field_vars: dict[str, ir.Var] = {}
-                    for field_name, dtype in get_tiling_fields(tiling_cls).items():
-                        flat_name = f"{param_name}_{field_name}"
-                        flat_var = f.param(flat_name, ir.ScalarType(dtype), param_span)
-                        field_vars[field_name] = flat_var
+                    field_vars: dict[str, ir.Var | list[ir.Var]] = {}
+                    for field_name, field_info in get_tiling_fields(tiling_cls).items():
+                        if isinstance(field_info, ScalarFieldInfo):
+                            flat_name = f"{param_name}_{field_name}"
+                            flat_var = f.param(flat_name, ir.ScalarType(field_info.dtype), param_span)
+                            field_vars[field_name] = flat_var
+                        else:  # ArrayFieldInfo
+                            vars_list: list[ir.Var] = []
+                            for i in range(field_info.size):
+                                flat_name = f"{param_name}_{field_name}_{i}"
+                                flat_var = f.param(flat_name, ir.ScalarType(field_info.dtype), param_span)
+                                vars_list.append(flat_var)
+                            field_vars[field_name] = vars_list
                     self.tiling_registry[param_name] = field_vars
                     continue  # do NOT register tiling name itself in scope
                 param_type, param_direction = self.type_resolver.resolve_param_type(arg.annotation)
@@ -2124,7 +2133,15 @@ class ASTParser:
             if obj_name in self.tiling_registry:
                 field_vars = self.tiling_registry[obj_name]
                 if field_name in field_vars:
-                    return field_vars[field_name]
+                    val = field_vars[field_name]
+                    if isinstance(val, list):
+                        raise ParserTypeError(
+                            f"Array field '{field_name}' must be accessed with an integer index",
+                            span=span,
+                            hint=f"Use {obj_name}.{field_name}[0] through "
+                                 f"{obj_name}.{field_name}[{len(val) - 1}]",
+                        )
+                    return val  # scalar ir.Var
                 raise ParserTypeError(
                     f"Tiling parameter '{obj_name}' has no field '{field_name}'",
                     span=span,
@@ -2177,6 +2194,40 @@ class ASTParser:
             nested = my_tuple[1][2]  # Creates nested TupleGetItemExpr
         """
         span = self.span_tracker.get_span(subscript)
+
+        # Check for tiling array field access: tiling.arr[i]
+        if isinstance(subscript.value, ast.Attribute):
+            attr = subscript.value
+            if (isinstance(attr.value, ast.Name)
+                    and attr.value.id in self.tiling_registry):
+                obj_name = attr.value.id
+                field_name = attr.attr
+                field_val = self.tiling_registry[obj_name].get(field_name)
+                if isinstance(field_val, list):
+                    if (not isinstance(subscript.slice, ast.Constant)
+                            or not isinstance(subscript.slice.value, int)):
+                        raise UnsupportedFeatureError(
+                            "Tiling array fields only support literal integer indices",
+                            span=span,
+                            hint=f"Use a constant index like tiling.{field_name}[0]",
+                        )
+                    idx = subscript.slice.value
+                    if idx < 0 or idx >= len(field_val):
+                        raise ParserTypeError(
+                            f"Index {idx} out of bounds for array field '{field_name}' "
+                            f"(size {len(field_val)})",
+                            span=span,
+                            hint=f"Valid indices are 0 to {len(field_val) - 1}",
+                        )
+                    return field_val[idx]
+                elif field_val is not None:
+                    # Scalar field accessed with subscript — helpful error
+                    raise ParserTypeError(
+                        f"Scalar field '{field_name}' does not support subscript access",
+                        span=span,
+                        hint=f"Use tiling.{field_name} directly (no index needed)",
+                    )
+
         value_expr = self.parse_expression(subscript.value)
 
         # Parse index from slice
