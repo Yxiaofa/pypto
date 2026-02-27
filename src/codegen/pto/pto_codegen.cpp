@@ -408,6 +408,15 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
 
     std::ostringstream line;
     line << tile_buf << " = pto.alloc_tile";
+    // Emit base_addr when the MemRef carries an explicit non-zero address
+    // (i.e., set by the user via block.create_tile addr= kwarg).
+    if (memref->addr_) {
+      if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
+        if (const_addr->value_ != 0) {
+          stream_ << " base_addr = " << const_addr->value_;
+        }
+      }
+    }
     if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
     if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
     line << " : " << GetTileBufTypeString(memref.get());
