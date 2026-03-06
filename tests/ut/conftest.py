@@ -8,12 +8,26 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """Shared fixtures for unit tests."""
-
+import os
 import pytest
 from pypto.pypto_core import passes
 
 
 @pytest.fixture(autouse=True)
+def set_npu_arch():
+    """Set npu_arch environment variable for all tests.
+    
+    This ensures the backend can access the NPU architecture information
+    during test execution.
+    """
+    original_value = os.environ.get("npu_arch")
+    os.environ["npu_arch"] = "dav-2201"
+    yield
+    if original_value is not None:
+        os.environ["npu_arch"] = original_value
+    else:
+        os.environ.pop("npu_arch", None)
+
 def pass_verification_context():
     """Enable BEFORE_AND_AFTER property verification for all pass executions.
 

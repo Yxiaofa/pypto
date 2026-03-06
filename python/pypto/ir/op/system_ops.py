@@ -112,3 +112,29 @@ def bar_m(*, span: Span | None = None) -> Call:
 def bar_all(*, span: Span | None = None) -> Call:
     """Global barrier synchronization."""
     return _create_barrier_op("system.bar_all", span=span)
+
+def sync_all(
+    *,
+    aiv_only: bool = True,
+    trigger_pipe: PipeType = PipeType.ALL,
+    wait_pipe: PipeType = PipeType.ALL,
+    span: Span | None = None,
+) -> Call:
+    """Matrix multiplication with optional transpose.
+
+    Args:
+        aiv_only: True for AIV-ONLY sync, False for AIC and AIV sync
+        trigger_pipe: Pipe type to trigger sync flag (Supported: PIPE_ALL, PIPE_MTE2, PIPE_MTE)
+        wait_pipe: Pipe type to wait for sync flag (Supported: PIPE_ALL, PIPE_MTE2, PIPE_MTE)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression for matrix multiplication
+    """
+    kwargs = {
+        "aiv_only": aiv_only,
+        "trigger_pipe": trigger_pipe,
+        "wait_pipe": wait_pipe,
+    }
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("system.sync_all", [], kwargs, actual_span)

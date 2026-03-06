@@ -119,7 +119,7 @@ def _get_mlir_code(result):
     return result if isinstance(result, str) else "".join(result.values())
 
 
-def compile(prog, clean_up=False, timeout=20):
+def compile(prog, npu_arch="dav-2201", clean_up=False, timeout=20):
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
     Path("./build").mkdir(parents=True, exist_ok=True)
@@ -127,7 +127,7 @@ def compile(prog, clean_up=False, timeout=20):
     raw_cpp_path = "./build/kernel.cpp"
     final_kernel = "./build/call_kernel.cpp"
     lib_path = "./build/calll_kernel.so"
-
+    os.environ["npu_arch"] = npu_arch
     # step 1, Program -> PtoAs-mlir
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(prog))
@@ -159,7 +159,7 @@ def compile(prog, clean_up=False, timeout=20):
         "-fPIC",
         "-shared",
         "-xcce",
-        "--npu-arch=dav-2201",
+        f"--npu-arch={npu_arch}",
         "-DMEMORY_BASE",  # here hardcoded for A2A3; TODO: expose this option to jit interface
         "-O2",
         "-std=c++17",
