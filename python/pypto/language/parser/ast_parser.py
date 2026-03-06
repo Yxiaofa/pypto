@@ -374,6 +374,19 @@ class ASTParser:
                 var_name = target.id
                 span = self.span_tracker.get_span(stmt)
 
+                # Check if this is a TileType assignment
+                if isinstance(stmt.value, ast.Call):
+                    func = stmt.value.func
+                    # TileType(...)
+                    if isinstance(func, ast.Name) and func.id == "TileType":
+                        tile_type = self._parse_tile_type_call(stmt.value)
+                        self.scope_manager.define_python_var(var_name, tile_type, span=span)
+                        return
+                    # plm.TileType(...)
+                    if isinstance(func, ast.Attribute) and func.attr == "TileType":
+                        tile_type = self._parse_tile_type_call(stmt.value)
+                        self.scope_manager.define_python_var(var_name, tile_type, span=span)
+                        return
                 # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
@@ -1267,7 +1280,7 @@ class ASTParser:
                 hint="Use supported expressions like variables, constants, operations, or function calls",
             )
 
-    def parse_name(self, name: ast.Name) -> ir.Expr:
+    def parse_name(self, name: ast.Name) -> ir.Expr | Any:
         """Parse variable name reference.
 
         Resolves names by checking the DSL scope first, then falling back
@@ -1280,6 +1293,11 @@ class ASTParser:
             IR expression (Var from scope, or constant/tuple from closure)
         """
         var_name = name.id
+        # Check if it's a Python variable (non-IR value like TileType)
+        python_var = self.scope_manager.get_python_var(var_name)
+        if python_var is not None:
+            return python_var
+
         var = self.scope_manager.lookup_var(var_name)
 
         if var is not None:
@@ -1429,6 +1447,9 @@ class ASTParser:
             IR expression from call
         """
         func = call.func
+        # Handle TileType(...) - type descriptor, not an operation
+        if isinstance(func, ast.Name) and func.id == "TileType":
+            return self._parse_tile_type_call(call)
 
         # Handle pl.yield_() specially
         if isinstance(func, ast.Attribute) and func.attr == "yield_":
@@ -1552,13 +1573,17 @@ class ASTParser:
         # pl.const(value, dtype) — typed constant literal
         if len(attrs) >= 2 and attrs[0] in ("pl", "plm") and attrs[1] == "const":
             return self._parse_typed_constant(call)
+        
+        # plm.TileType(...) - type descriptor, not an operation
+        if len(attrs) == 2 and attrs[0] == "plm" and attrs[1] == "TileType":
+            return self._parse_tile_type_call(call)
 
         # plm.{operation} (2-segment) — manual (non-SSA) ops
         if len(attrs) == 2 and attrs[0] == "plm" and attrs[1] != "const":
             return self._parse_manual_op(attrs[1], call)
 
         # pl.{operation} (2-segment, unified dispatch or promoted ops)
-        if len(attrs) >= 2 and attrs[0] in ("pl", "plm") and attrs[1] not in ("tensor", "block", "system"):
+        if len(attrs) >= 2 and attrs[0] in ("pl", "plm") and attrs[1] not in ("tensor", "block", "system", "TileType"):
             op_name = attrs[1]
             return self._parse_unified_op(op_name, call)
 
@@ -1707,6 +1732,16 @@ class ASTParser:
 
         return return_expr
 
+    def _parse_tile_type_call(self, call: ast.Call) -> Any:
+        """Parse TileType(...) as a dataclass instantiation."""
+        from pypto.language.manual.op.manual_ops import TileType
+
+        kwargs = {}
+        for kw in call.keywords:
+            kwargs[kw.arg] = self._resolve_single_kwarg(kw.arg, kw.value)
+
+        return TileType(**kwargs)
+
     def _parse_op_kwargs(self, call: ast.Call) -> dict[str, Any]:
         """Parse keyword arguments for an operation call.
 
@@ -1825,6 +1860,28 @@ class ASTParser:
         args = [self.parse_expression(arg) for arg in call.args]
         kwargs = self._parse_op_kwargs(call)
 
+        # Special handling for make_tile with TileType
+        if op_name == "make_tile":
+            from pypto.language.manual.op.manual_ops import TileType
+            if len(args) >= 1 and isinstance(args[0], TileType):
+                tile_type = args[0]
+                # Extract parameters from TileType
+                kwargs.setdefault("shape", tile_type.shape)
+                kwargs.setdefault("dtype", tile_type.dtype)
+                kwargs.setdefault("target_memory", tile_type.target_memory)
+                if tile_type.valid_shape is not None:
+                    kwargs.setdefault("valid_shape", tile_type.valid_shape)
+                if tile_type.blayout is not None:
+                    kwargs.setdefault("blayout", tile_type.blayout)
+                if tile_type.slayout is not None:
+                    kwargs.setdefault("slayout", tile_type.slayout)
+                if tile_type.fractal is not None:
+                    kwargs.setdefault("fractal", tile_type.fractal)
+                if tile_type.pad is not None:
+                    kwargs.setdefault("pad", tile_type.pad)
+                # Remove TileType from args, keep addr and size
+                args = args[1:]
+
         # Call the appropriate block operation
         if hasattr(ir_op.block, op_name):
             op_func = getattr(ir_op.block, op_name)
@@ -1887,7 +1944,7 @@ class ASTParser:
     # Manual ops that share block SSA semantics (no explicit output tile arg).
     # These are routed to _parse_block_op directly.
     _MANUAL_AS_BLOCK_OPS: frozenset[str] = frozenset({
-        "create_tile",  # allocation — same IR op as SSA
+        "make_tile",  # allocation — same IR op as SSA
         "store",        # writes to tensor, returns result
         "l0c_store",    # writes L0C tile to tensor
     })
@@ -1938,7 +1995,7 @@ class ASTParser:
         )
 
         # Do NOT rebind the dst variable in scope.  The tile Var created by
-        # create_tile remains the canonical buffer handle for the whole kernel;
+        # make_tile remains the canonical buffer handle for the whole kernel;
         # manual ops (load, add, …) are side-effects on that buffer.  Re-binding
         # to the Call node would cause subsequent uses of the variable to resolve
         # to a Call rather than a Var, breaking GetExprAsCode lookups in the
@@ -2017,7 +2074,7 @@ class ASTParser:
         "gemv_acc",
         "gemv_bias",
         "abs",
-        "create_tile",
+        "make_tile",
     }
 
     def _parse_unified_op(self, op_name: str, call: ast.Call) -> ir.Expr:

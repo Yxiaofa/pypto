@@ -146,7 +146,7 @@ def _build_branch_lines(
     ``pl.Tile`` type annotation.  ``branch_out`` is only used inside the same
     branch (for the store) and never crosses the if/else boundary.
 
-    Branches use basic_ops_only (no matmul, no reductions requiring create_tile)
+    Branches use basic_ops_only (no matmul, no reductions requiring make_tile)
     to avoid triggering BasicMemoryReuse buffer tracking bugs inside IfStmt.
 
     Args:

@@ -37,7 +37,7 @@ class RMSNormProgram:
         squared: pl.Tile[[32, 64], pl.FP32] = pl.mul(tile_x, tile_x)
 
         # mean_sq = sum(x^2, dim=-1, keepdim=True) / hidden_size
-        tmp: pl.Tile[[32, 64], pl.FP32] = pl.create_tile(
+        tmp: pl.Tile[[32, 64], pl.FP32] = pl.make_tile(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
         mean_sq: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(squared, tmp)

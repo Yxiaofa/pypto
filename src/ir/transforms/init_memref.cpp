@@ -55,7 +55,7 @@ MemorySpace ExtractTargetMemory(const CallPtr& call) {
 
 // Return value memory space rules for block operators
 const std::map<std::string, std::optional<MemorySpace>> kBlockOpMemoryRules = {
-    {"block.create_tile", std::nullopt},     // Extract from target_memory
+    {"block.make_tile", std::nullopt},     // Extract from target_memory
     {"block.load", std::nullopt},            // Extract from target_memory
     {"block.move", std::nullopt},            // Extract from target_memory
     {"block.store", MemorySpace::DDR},       // Fixed DDR

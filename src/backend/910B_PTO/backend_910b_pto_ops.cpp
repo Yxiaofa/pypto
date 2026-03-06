@@ -528,7 +528,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.alloc")
       return MakeBlockAllocCodegenPTO(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_PTO, "block.create_tile")
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.make_tile")
     .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
       (void)op;

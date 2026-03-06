@@ -57,7 +57,7 @@ from .op.block_ops import (
     col_expand_div,
     col_expand_mul,
     col_expand_sub,
-    create_tile,
+    make_tile,
     expands,
     gemv,
     gemv_acc,
@@ -200,7 +200,7 @@ __all__ = [
     "row_max",
     "row_sum",
     # Promoted block-only
-    "create_tile",
+    "make_tile",
     "load",
     "store",
     "l0c_store",

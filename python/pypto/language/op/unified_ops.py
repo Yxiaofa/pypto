@@ -32,7 +32,7 @@ __all__ = [
     "row_max",
     "row_sum",
     "cast",
-    "create_tile",
+    "make_tile",
 ]
 
 from pypto.pypto_core import DataType
@@ -244,6 +244,6 @@ def cast(
 # ---------------------------------------------------------------------------
 
 
-def create_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
+def make_tile(shape: list[int], dtype: DataType, target_memory: MemorySpace) -> Tile:
     """Create a tile at specific memory space."""
-    return _block.create_tile(shape, dtype, target_memory)
+    return _block.make_tile(shape, dtype, target_memory)

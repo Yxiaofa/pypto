@@ -10,7 +10,7 @@
 """PyPTO Manual (non-SSA) Language module.
 
 Provides an imperative, non-SSA tile programming interface.  The user explicitly
-allocates output tile buffers with :func:`create_tile` and then calls operations
+allocates output tile buffers with :func:`make_tile` and then calls operations
 that write results into those pre-allocated buffers.  All compute operations
 accept the output tile as their last argument and return ``None``.
 
@@ -21,9 +21,9 @@ Example::
     from pypto.pypto_core.ir import MemorySpace
 
     # Allocate tiles
-    a   = pm.create_tile([64, 64], DataType.FP32)
-    b   = pm.create_tile([64, 64], DataType.FP32)
-    out = pm.create_tile([64, 64], DataType.FP32)
+    a   = pm.make_tile([64, 64], DataType.FP32)
+    b   = pm.make_tile([64, 64], DataType.FP32)
+    out = pm.make_tile([64, 64], DataType.FP32)
 
     # Load inputs
     pm.load(tensor_a, [0, 0], [64, 64], a)
@@ -55,7 +55,7 @@ from .op.manual_ops import (
     col_expand_div,
     col_expand_mul,
     col_expand_sub,
-    create_tile,
+    make_tile,
     div,
     divs,
     exp,
@@ -112,6 +112,7 @@ from .op.manual_ops import (
     subsc,
     subs,
     transpose,
+    TileType,
     ub_copy,
     xor,
     xors,
@@ -142,9 +143,10 @@ INDEX = DataType.INDEX
 __all__ = [
     # Types
     "Tensor", "Tile", "Scalar", "DynVar", "dynamic",
+    "TileType",
     "MemorySpace",
     # Allocation
-    "create_tile",
+    "make_tile",
     # Memory
     "load", "store", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx",
     # Tile x Tile binary

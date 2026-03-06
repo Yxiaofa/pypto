@@ -341,7 +341,7 @@ static std::string MakeBlockGetBlockIdxCodegenCCE(const ir::CallPtr& op, codegen
   return "";
 }
 
-// Helper function for block.create_tile (no-op: allocation handled elsewhere)
+// Helper function for block.make_tile (no-op: allocation handled elsewhere)
 static std::string MakeBlockCreateTileCodegenCCE(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
   (void)op;
   (void)codegen_base;
@@ -536,7 +536,7 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "block.alloc")
       return MakeBlockAllocCodegenCCE(op, codegen);
     });
 
-REGISTER_BACKEND_OP(Backend910B_CCE, "block.create_tile")
+REGISTER_BACKEND_OP(Backend910B_CCE, "block.make_tile")
     .set_pipe(ir::PipeType::MTE2)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockCreateTileCodegenCCE(op, codegen);

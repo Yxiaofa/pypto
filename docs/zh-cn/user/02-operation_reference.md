@@ -23,7 +23,7 @@
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | 矩阵乘法 |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行最大值（tile 路径需要 `tmp_tile`） |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | 行求和（tile 路径需要 `tmp_tile`） |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile（tile-only，提升自 `pl.block.create_tile`） |
+| `make_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile（tile-only，提升自 `pl.block.make_tile`） |
 
 ## 仅 Tensor（`pl.tensor.*`）
 
@@ -60,7 +60,7 @@
 | `l0c_store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Acc tile → DDR |
 | `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | 在内存层级间移动 tile |
 | `vec_move` | `(tile: Tile) -> Tile` | 在 Vec 内存内拷贝 tile |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
+| `make_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | 在指定内存空间创建 tile |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | 创建用常量填充的 tile |
 | `fillpad` | `(tile: Tile) -> Tile` | 用填充值填充 tile |
 | `get_block_idx` | `() -> Scalar` | 获取当前 block 索引（UINT64） |

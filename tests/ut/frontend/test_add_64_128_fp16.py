@@ -31,11 +31,11 @@ def add_kernel(
     y: pl.Tensor[[64, 128], pl.FP16],
     z: pl.Tensor[[64, 128], pl.FP16]
 ) -> pl.Tensor[[64, 128], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_b = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
-    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
+    tile_c = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     with pl.section_vector():
         plm.load(x, [0, 0], [64, 128], out=tile_a)

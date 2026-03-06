@@ -23,7 +23,7 @@ Auto-selects between tensor and tile implementation based on input type.
 | `matmul` | `(lhs: T, rhs: T, out_dtype=None, a_trans=False, b_trans=False, c_matrix_nz=False) -> T` | Matrix multiplication |
 | `row_max` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise max (tile path requires `tmp_tile`) |
 | `row_sum` | `(input: T, tmp_tile: Tile \| None = None) -> T` | Row-wise sum (tile path requires `tmp_tile`) |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Tile-only (promoted from `pl.block.create_tile`): create tile at specific memory space |
+| `make_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Tile-only (promoted from `pl.block.make_tile`): create tile at specific memory space |
 
 ## Tensor-Only (`pl.tensor.*`)
 
@@ -60,7 +60,7 @@ Transfer data between memory hierarchy levels.
 | `l0c_store` | `(tile: Tile, offsets: Sequence[IntLike], shapes: Sequence[IntLike], output_tensor: Tensor) -> Tensor` | Acc tile → DDR |
 | `move` | `(tile: Tile, target_memory: MemorySpace, transpose: bool = False) -> Tile` | Move tile between memory levels |
 | `vec_move` | `(tile: Tile) -> Tile` | Copy tile within Vec memory |
-| `create_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
+| `make_tile` | `(shape: Sequence[IntLike], dtype: DataType, target_memory: MemorySpace = MemorySpace.Vec) -> Tile` | Create tile at memory space |
 | `full` | `(shape: list[int], dtype: DataType, value: int \| float) -> Tile` | Create tile filled with constant |
 | `fillpad` | `(tile: Tile) -> Tile` | Fill tile with padding values |
 | `get_block_idx` | `() -> Scalar` | Get current block index (UINT64) |

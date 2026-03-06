@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from typing import Literal, Optional, overload, Union 
 
 __all__ = [
-    "create_tile",
+    "make_tile",
     "load",
     "store",
     "l0c_store",
@@ -110,7 +110,7 @@ def _normalize_intlike(seq: Sequence[IntLike]) -> list[int | Expr]:
     return [elem.unwrap() if isinstance(elem, Scalar) else elem for elem in seq]
 
 
-def create_tile(
+def make_tile(
     shape: Sequence[IntLike],
     dtype: DataType,
     target_memory: MemorySpace = MemorySpace.Vec,
@@ -125,11 +125,11 @@ def create_tile(
         target_memory: Target memory space (MemorySpace.Vec, .Mat, .Left, .Right)
 
     Returns:
-        Tile wrapping the create_tile operation
+        Tile wrapping the make_tile operation
     """
-    # create_tile C++ binding accepts Sequence[int]; Expr elements from Scalar
+    # make_tile C++ binding accepts Sequence[int]; Expr elements from Scalar
     # unwrapping are valid at DSL parse time (parser reads the AST).
-    call_expr = _ir_ops.create_tile(
+    call_expr = _ir_ops.make_tile(
         _normalize_intlike(shape),  # type: ignore[reportArgumentType]
         dtype,
         target_memory, addr, size

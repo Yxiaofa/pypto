@@ -427,7 +427,7 @@ class KernelGenerator:
 
         tmp_tile_var = f"tmp_tile_{output}"
         code_lines.append(
-            f"        {tmp_tile_var} = pl.create_tile([{tmp_shape[0]}, {tmp_shape[1]}], "
+            f"        {tmp_tile_var} = pl.make_tile([{tmp_shape[0]}, {tmp_shape[1]}], "
             f"dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)"
         )
         code_lines.append(f"        {output} = pl.{op_name}({inputs_list[0]}, {tmp_tile_var})")

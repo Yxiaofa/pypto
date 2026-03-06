@@ -89,7 +89,7 @@ def kernel_softmax_prepare(
     """Softmax prepare: scale, row_max, exp, row_sum (VECTOR)."""
     s_tile = pl.load(sij, [0, 0], [16, 128], target_memory=pl.MemorySpace.Vec)
     scaled = pl.mul(s_tile, scale)
-    tmp_tile = pl.create_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
+    tmp_tile = pl.make_tile([16, 128], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec)
     mi_tile = pl.row_max(scaled, tmp_tile)
     sij_centered = pl.row_expand_sub(scaled, mi_tile)
     exp_tile = pl.exp(sij_centered)

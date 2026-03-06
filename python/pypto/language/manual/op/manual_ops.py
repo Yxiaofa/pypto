@@ -18,9 +18,9 @@ Typical usage::
 
     import pypto.language.manual as pm
 
-    out = pm.create_tile([64, 64], pm.FP32)
-    a   = pm.create_tile([64, 64], pm.FP32)
-    b   = pm.create_tile([64, 64], pm.FP32)
+    out = pm.make_tile([64, 64], pm.FP32)
+    a   = pm.make_tile([64, 64], pm.FP32)
+    b   = pm.make_tile([64, 64], pm.FP32)
 
     pm.load(tensor_a, [0, 0], [64, 64], a)
     pm.load(tensor_b, [0, 0], [64, 64], b)
@@ -31,6 +31,7 @@ Typical usage::
 from collections.abc import Sequence
 from typing import Literal, Optional, Sequence, Union
 
+from dataclasses import dataclass
 from pypto.ir.op import block_ops as _ir_block_ops
 from pypto.ir.utils import _to_make_tuple
 from pypto.pypto_core import DataType
@@ -39,6 +40,36 @@ from pypto.pypto_core.ir import Expr, MemorySpace, Span
 
 from ...typing import Scalar, Tensor, Tile
 
+
+# ---------------------------------------------------------------------------
+# TileType descriptor
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TileType:
+    """Tile type descriptor containing shape, dtype, and TileView parameters.
+
+    This class encapsulates all the type information for a tile, which can then
+    be used to create an actual tile with memory allocation via make_tile().
+
+    Args:
+        shape: Tile shape dimensions.
+        dtype: Element data type.
+        target_memory: Memory space for the tile (default Vec).
+        valid_shape: Valid shape dimensions (optional).
+        blayout: Block layout (0=none_box, 1=row_major, 2=col_major, optional).
+        slayout: Scatter layout (0=none_box, 1=row_major, 2=col_major, optional).
+        fractal: Fractal size (optional).
+        pad: Pad mode (0=null, 1=zero, 2=max, 3=min, optional).
+    """
+    shape: Sequence[int] | _ir_core.MakeTuple
+    dtype: DataType
+    target_memory: MemorySpace = MemorySpace.Vec
+    valid_shape: Optional[Sequence[int]] = None
+    blayout: Optional[int] = None
+    slayout: Optional[int] = None
+    fractal: Optional[int] = None
+    pad: Optional[int] = None
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -62,29 +93,34 @@ def _op(name: str, ins: list, out: Tile, **kwargs) -> None:
 # ---------------------------------------------------------------------------
 # Allocation / creation
 # ---------------------------------------------------------------------------
-def create_tile(
-    shape: list[int],
-    dtype: DataType,
-    target_memory: MemorySpace = MemorySpace.Vec,
-    addr: Optional[Union[int, Expr]] = None,
-    size: Optional[int] = None,
+def make_tile(
+    tile_type: TileType,
+    addr: int | Expr,  
+    size: int, 
 ) -> Tile:
     """Allocate a tile buffer.
 
-    This is identical to the SSA ``block.create_tile`` op.  The returned Tile
+    This is identical to the SSA ``block.make_tile`` op.  The returned Tile
     must subsequently be passed as the ``out`` argument to load/compute ops.
 
     Args:
-        shape: Tile shape.
-        dtype: Element data type.
-        target_memory: Memory space for the tile (default UB).
-        addr: Optional memory address (int or Expr)
-        size: Optional memory size in bytes
+        tile_type: Tile type descriptor containing shape, dtype, and TileView params.
+        addr: Memory address (int or Expr). Required for manual mode.
+        size: Memory size in bytes. Required for manual mode.
 
     Returns:
         Tile wrapping the allocation expression.
     """
-    return Tile(expr=_ir_block_ops.create_tile(shape, dtype, target_memory, addr, size))
+    return Tile(expr=_ir_block_ops.make_tile(shape=tile_type.shape,
+        dtype=tile_type.dtype,
+        target_memory=tile_type.target_memory,
+        addr=addr,
+        size=size,
+        valid_shape=tile_type.valid_shape,
+        blayout=tile_type.blayout,
+        slayout=tile_type.slayout,
+        fractal=tile_type.fractal,
+        pad=tile_type.pad))
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +652,7 @@ def transpose(tile: Tile, axis1: int, axis2: int, out: Tile) -> None:
 
 __all__ = [
     # Allocation
-    "create_tile",
+    "make_tile",
     # Memory
     "load", "store", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx",
     # Tile x Tile binary

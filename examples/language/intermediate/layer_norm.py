@@ -36,7 +36,7 @@ class LayerNormProgram:
         # Workaround: reshape [32, 1] -> [1, 32], apply op, reshape back.
 
         # mean = sum(x, dim=-1, keepdim=True) / hidden_size
-        tmp: pl.Tile[[32, 64], pl.FP32] = pl.create_tile(
+        tmp: pl.Tile[[32, 64], pl.FP32] = pl.make_tile(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
         mean: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(tile_x, tmp)
@@ -49,7 +49,7 @@ class LayerNormProgram:
 
         # var = sum(centered^2, dim=-1, keepdim=True) / hidden_size
         squared: pl.Tile[[32, 64], pl.FP32] = pl.mul(centered, centered)
-        tmp2: pl.Tile[[32, 64], pl.FP32] = pl.create_tile(
+        tmp2: pl.Tile[[32, 64], pl.FP32] = pl.make_tile(
             [32, 64], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
         var: pl.Tile[[32, 1], pl.FP32] = pl.row_sum(squared, tmp2)

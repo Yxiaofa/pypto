@@ -29,7 +29,7 @@ class TileSoftmaxProgram:
         tile_a: pl.Tile[[64, 64], pl.FP32] = pl.load(a, [0, 0], [64, 64])
 
         # Step 1: row-wise max for numerical stability
-        max_tmp: pl.Tile[[64, 1], pl.FP32] = pl.create_tile(
+        max_tmp: pl.Tile[[64, 1], pl.FP32] = pl.make_tile(
             [64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
         row_max: pl.Tile[[64, 1], pl.FP32] = pl.row_max(tile_a, max_tmp)
@@ -41,7 +41,7 @@ class TileSoftmaxProgram:
         exp_shifted: pl.Tile[[64, 64], pl.FP32] = pl.exp(shifted)
 
         # Step 4: row-wise sum of exp values
-        sum_tmp: pl.Tile[[64, 1], pl.FP32] = pl.create_tile(
+        sum_tmp: pl.Tile[[64, 1], pl.FP32] = pl.make_tile(
             [64, 1], dtype=pl.FP32, target_memory=pl.MemorySpace.Vec
         )
         row_sum: pl.Tile[[64, 1], pl.FP32] = pl.row_sum(exp_shifted, sum_tmp)
