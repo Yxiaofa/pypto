@@ -853,6 +853,150 @@ def test_pto_codegen_section_with_for_loop():
     assert "pto.tadds" in mlir_code
     assert "pto.tstore" in mlir_code
 
+def test_pto_codegen_sync_all_default():
+    """Test that sync_all with default parameters generates correct MLIR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class SyncAllDefaultProgram:
+        @pl.function
+
+        def sync_test(
+            self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32]):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            tile_b = pl.load(b, offsets=[0, 0], shapes=[32, 32])
+            pl.system.sync_all()
+            result = pl.add(tile_a, tile_b)
+            pl.store(result, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(SyncAllDefaultProgram)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+
+    # Verify sync_all generates barrier, sync.set, sync.wait
+    assert "pto.barrier" in mlir_code
+    assert "pto.sync.set" in mlir_code
+    assert "pto.sync.wait" in mlir_code
+
+def test_pto_codegen_sync_all_aiv_only():
+    """Test that sync_all with aiv_only=True generates correct MLIR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class SyncAllAivOnlyProgram:
+        @pl.function
+        def sync_test(
+            self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32]):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            pl.system.sync_all(aiv_only=True)
+            result = pl.mul(tile_a, 2.0)
+            pl.store(result, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(SyncAllAivOnlyProgram)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+
+    # Verify sync_all generates correct operations
+    assert "pto.barrier" in mlir_code
+    assert "pto.sync.set" in mlir_code
+    assert "pto.sync.wait" in mlir_code
+
+def test_pto_codegen_sync_all_mix_mode():
+    """Test that sync_all with aiv_only=False generates correct MLIR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class SyncAllMixModeProgram:
+        @pl.function
+        def sync_test(
+            self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32]):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            pl.system.sync_all(aiv_only=False)
+            result = pl.mul(tile_a, 2.0)
+            pl.store(result, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(SyncAllMixModeProgram)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+
+    # Verify sync_all generates correct operations for mix mode
+    assert "pto.barrier" in mlir_code
+    assert "pto.sync.set" in mlir_code
+    assert "pto.sync.wait" in mlir_code
+
+def test_pto_codegen_sync_all_custom_pipes():
+    """Test that sync_all with custom pipes generates correct MLIR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class SyncAllCustomPipesProgram:
+        @pl.function
+        def sync_test(
+            self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32]):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            pl.system.sync_all(
+                aiv_only=True,
+                trigger_pipe=pl.PipeType.MTE3,
+                wait_pipe=pl.PipeType.ALL
+            )
+            result = pl.mul(tile_a, 2.0)
+            pl.store(result, offsets=[0, 0], shapes=[32, 32], output_tensor=output)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(SyncAllCustomPipesProgram)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+
+    # Verify sync_all generates correct operations
+    assert "pto.barrier" in mlir_code
+    assert "pto.sync.set" in mlir_code
+    assert "pto.sync.wait" in mlir_code
+
+def test_pto_codegen_sync_all_mix_mode_custom_pipes():
+    """Test that sync_all with is_aiv_only=False and custom pipes generates correct MLIR."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class SyncAllMixModeCustomPipesProgram:
+        @pl.function
+        def sync_test(
+            self, a: pl.Tensor[[32, 32], pl.FP32], b: pl.Tensor[[32, 32], pl.FP32],
+            output: pl.Tensor[[32, 32], pl.FP32]):
+            tile_a = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+            pl.system.sync_all(
+                aiv_only=False,
+                trigger_pipe=pl.PipeType.MTE3,
+                wait_pipe=pl.PipeType.ALL
+            )
+            result = pl.mul(tile_a, 2.0)
+            pl.store(result, offsets=[0, 0], shapes=[32, 32], output_tensor=b)
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(SyncAllMixModeCustomPipesProgram)
+
+    codegen = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen.generate(transformed_program))
+
+    # Verify sync_all generates correct operations for mix mode
+    assert "pto.barrier" in mlir_code
+    assert "pto.sync.set" in mlir_code
+    assert "pto.sync.wait" in mlir_code
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -695,5 +695,58 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "ptr.addptr")
       return MakePtrAddPtrCodegenPTO(op, codegen);
     });
 
+static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.empty()) << "system.sync_all takes no arguments, but got " << op->args_.size();
+  bool aiv_only = false;
+  int trigger_pipe_val = 0, wait_pipe_val = 0;
+  for (const auto& [key, value] : op->kwargs_) {
+    if (key == "aiv_only") {
+      aiv_only = std::any_cast<bool>(value);
+    } else if (key == "trigger_pipe") {
+      trigger_pipe_val = std::any_cast<int>(value);
+    } else if (key == "wait_pipe") {
+      wait_pipe_val = std::any_cast<int>(value);
+    }
+  }
+
+  if (aiv_only) {
+    codegen.Emit("pto.section.vector");
+    std::string trigger_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(trigger_pipe_val));
+    codegen.Emit("pto.barrier ins(" + trigger_pipe_str + ")");
+    if (trigger_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+      codegen.Emit("pto.sync.set ins(MTE3, 3585)");
+    } else {
+      codegen.Emit("pto.sync.set ins(" + trigger_pipe_str + ", 3585)");
+    }
+    if (wait_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+      codegen.Emit("pto.sync.wait ins(S, 14)");
+    } else {
+      std::string wait_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(wait_pipe_val));
+      codegen.Emit("pto.sync.wait ins(" + wait_pipe_str + ", 14)");
+    }
+  } else {
+    codegen.Emit("pto.barrier ins(ALL)");
+    // AIC
+    codegen.Emit("pto.section.cube");
+    codegen.Emit("pto.sync.wait ins(S, 12)");
+    codegen.Emit("pto.sync.wait ins(S, 28)");
+    codegen.Emit("pto.sync.set ins(FIX, 2817)");
+    codegen.Emit("pto.sync.wait ins(S, 11)");
+    codegen.Emit("pto.sync.set ins(S, 13)");
+    codegen.Emit("pto.sync.set ins(MTE3, 29)");
+    // AIV
+    codegen.Emit("pto.section.vector");
+    codegen.Emit("pto.sync.set ins(MTE3, 12)");
+    codegen.Emit("pto.sync.wait ins(S, 13)");
+  }
+  return "";
+}
+REGISTER_BACKEND_OP(Backend910B_PTO, "system.sync_all")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeSystemSyncAllCodegenPTO(op, codegen);
+    });
+
 }  // namespace backend
 }  // namespace pypto
