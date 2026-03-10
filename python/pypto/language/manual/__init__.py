@@ -66,6 +66,7 @@ from .op.manual_ops import (
     gemv_acc,
     gemv_bias,
     get_block_idx,
+    get_subblock_idx,
     l0c_store,
     lrelu,
     load,
@@ -148,7 +149,7 @@ __all__ = [
     # Allocation
     "make_tile",
     # Memory
-    "load", "store", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx",
+    "load", "store", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx", "get_subblock_idx",
     # Tile x Tile binary
     "add", "sub", "mul", "div", "rem", "maximum", "minimum",
     "and_", "or_", "shl", "shr",

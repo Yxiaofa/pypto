@@ -26,6 +26,8 @@ __all__ = [
     "full",
     "fillpad",
     "get_block_idx",
+    "get_subblock_idx",
+    "index_cast",
     "add",
     "sub",
     "mul",
@@ -313,6 +315,46 @@ def get_block_idx() -> Scalar:
         >>>     ...
     """
     call_expr = _ir_ops.get_block_idx()
+    return Scalar(expr=call_expr)
+
+
+def get_subblock_idx() -> Scalar:
+    """Get the current subblock index.
+
+    This operation returns the index of the current compute subblock. It is typically
+    used in block-level programming to identify which subblock of data is being processed.
+
+    Returns:
+        Scalar wrapping the get_subblock_idx operation (UINT64 type)
+
+    Example:
+        >>> subblock_idx = pl.block.get_subblock_idx()
+        >>> if subblock_idx < 5:
+        >>>     # Process first 5 subblocks differently
+        >>>     ...
+    """
+    call_expr = _ir_ops.get_subblock_idx()
+    return Scalar(expr=call_expr)
+
+
+def index_cast(idx: int | float | Expr | Scalar) -> Scalar:
+    """Cast scalar to index type.
+
+    This operation converts a scalar value to index type for use in indexing operations.
+    It generates an arith.index_cast operation in MLIR.
+
+    Args:
+        idx: Input scalar value (int/float/Expr/Scalar)
+
+    Returns:
+        Scalar wrapping the index_cast operation
+
+    Example:
+        >>> idx: pl.Scalar[pl.INT64] = 42
+        >>> index_val = pl.block.index_cast(idx)
+    """
+    idx_expr = idx.unwrap() if isinstance(idx, Scalar) else idx
+    call_expr = _ir_ops.index_cast(idx_expr)
     return Scalar(expr=call_expr)
 
 

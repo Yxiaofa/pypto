@@ -390,6 +390,28 @@ REGISTER_OP("block.get_block_idx")
       return DeduceBlockGetBlockIdxType(args, kwargs, "block.get_block_idx");
     });
 
+REGISTER_OP("block.get_subblock_idx")
+    .set_op_category("BlockOp")
+    .set_description("Get the current subblock index")
+    .no_argument()
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceBlockGetBlockIdxType(args, kwargs, "block.get_subblock_idx");
+    });
+
+REGISTER_OP("block.index_cast")
+    .set_op_category("BlockOp")
+    .set_description("Cast scalar to index type")
+    .add_argument("idx", "Input scalar (ScalarType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      CHECK(args.size() == 1) << "block.index_cast requires 1 argument, but got " << args.size();
+      auto scalar_type = As<ScalarType>(args[0]->GetType());
+      CHECK(scalar_type) << "block.index_cast requires argument to be ScalarType, but got "
+                       << args[0]->GetType()->TypeName();
+      return std::make_shared<ScalarType>(DataType::INDEX);
+    });
+
 REGISTER_OP("block.make_tile")
     .set_op_category("BlockOp")
     .set_description("Create a tile")

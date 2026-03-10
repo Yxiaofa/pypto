@@ -308,6 +308,49 @@ def get_block_idx(span: Span | None = None) -> Call:
     return _ir_core.create_op_call("block.get_block_idx", [], {}, actual_span)
 
 
+def get_subblock_idx(span: Span | None = None) -> Call:
+    """Get the current subblock index.
+
+    This operation returns the index of the current compute subblock. It is typically
+    used in block-level programming to identify which subblock of data is being processed.
+
+    Args:
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns a UINT64 scalar representing the subblock index
+
+    Example:
+        >>> subblock_idx = pl.block.get_subblock_idx()
+        >>> if subblock_idx < 5:
+        >>>     # Process first 5 subblocks differently
+        >>>     ...
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("block.get_subblock_idx", [], {}, actual_span)
+
+
+def index_cast(idx: Expr, span: Span | None = None) -> Call:
+    """Cast scalar to index type.
+
+    This operation converts a scalar value to index type for use in indexing operations.
+    It generates an arith.index_cast operation in MLIR.
+
+    Args:
+        idx: Input scalar expression (ScalarType)
+        span: Optional source span for debugging (auto-captured if not provided)
+
+    Returns:
+        Call expression that returns an index scalar
+
+    Example:
+        >>> idx: pl.Scalar[pl.INT64] = 42
+        >>> index_val = pl.block.index_cast(idx)
+    """
+    actual_span = _get_span_or_capture(span)
+    return _ir_core.create_op_call("block.index_cast", [idx], {}, actual_span)
+
+
 def full(
     shape: Sequence[int] | _ir_core.MakeTuple,
     dtype: DataType,

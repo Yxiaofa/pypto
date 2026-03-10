@@ -641,6 +641,72 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
       return std::string("");
     });
 
+// Helper function for block.get_block_idx
+static std::string MakeBlockGetBlockIdxCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 0) << "block.get_block_idx requires no arguments";
+
+  // Create a new SSA variable for the scalar result
+  std::string result = codegen.NewTemp();
+  codegen.Emit(result + " = pto.get_block_idx");
+
+  // Register the result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.get_block_idx")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockGetBlockIdxCodegenPTO(op, codegen);
+    });
+
+// Helper function for block.get_subblock_idx
+static std::string MakeBlockGetSubblockIdxIdxCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 0) << "block.get_subblock_idx requires no arguments";
+
+  // Create a new SSA variable for the scalar result
+  std::string result = codegen.NewTemp();
+  codegen.Emit(result + " = pto.get_subblock_idx");
+
+  // Register the result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.get_subblock_idx")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockGetSubblockIdxIdxCodegenPTO(op, codegen);
+    });
+
+// Helper function for block.index_cast
+static std::string MakeBlockIndexCastCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "block.index_cast requires 1 argument";
+
+  std::string idx = codegen.GetExprAsCode(op->args_[0]);
+
+  // Create a new SSA variable for the result
+  std::string result = codegen.NewTemp();
+
+  // Emit arith.index_cast operation
+  codegen.Emit(result + " = arith.index_cast " + idx + " : i64 to index");
+
+  // Register result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.index_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockIndexCastCodegenPTO(op, codegen);
+    });
+
 // ptr.make_tensor: emit pto.make_tensor_view in function body
 static std::string MakePtrMakeTensorCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
