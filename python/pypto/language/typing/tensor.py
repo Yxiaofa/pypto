@@ -16,11 +16,42 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import Expr, MemRef, TensorLayout
 
 
+class TensorViewSpec:
+    """DSL helper for pl.view(layout=..., stride=[...], memref=...) in type annotations.
+
+    Used as the 3rd argument to pl.Tensor[[shape], dtype, pl.view(...)] to bundle
+    layout, stride, and memref into a single, readable object with keyword arguments.
+
+    Examples:
+        >>> pl.Tensor[[64, 128], pl.FP32, pl.view(layout=pl.NZ)]
+        >>> pl.Tensor[[64, 128], pl.FP32, pl.view(stride=[128, 1])]
+        >>> pl.Tensor[[64, 128], pl.FP32, pl.view(layout=pl.NZ, stride=[128, 1])]
+    """
+
+    def __init__(
+        self,
+        layout: TensorLayout | None = None,
+        stride: Sequence[Any] | None = None,
+        memref: MemRef | None = None,
+    ):
+        """Create a TensorViewSpec.
+
+        Args:
+            layout: Optional tensor layout (ND, DN, NZ)
+            stride: Optional stride for each dimension (raw Python values; the
+                type_resolver converts them to IR Expr during annotation parsing)
+            memref: Optional memory reference
+        """
+        self.layout = layout
+        self.stride = stride
+        self.memref = memref
+
+
 class TensorMeta(type):
     """Metaclass for Tensor to enable subscript notation."""
 
     def __getitem__(cls, item: tuple) -> "Tensor":
-        """Enable Tensor[[shape], dtype], Tensor[[shape], dtype, layout_or_memref],
+        """Enable Tensor[[shape], dtype], Tensor[[shape], dtype, layout_or_memref_or_view],
         and Tensor[[shape], dtype, layout, memref] syntax.
 
         Args:
@@ -31,7 +62,7 @@ class TensorMeta(type):
         """
         if not isinstance(item, tuple) or len(item) not in (2, 3, 4):
             raise TypeError(
-                "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref], "
+                "Tensor requires [shape, dtype], [shape, dtype, layout_or_memref_or_view], "
                 "or [shape, dtype, layout, memref] notation"
             )
 
@@ -40,6 +71,10 @@ class TensorMeta(type):
             return cls(shape, dtype, layout=layout, memref=memref, _annotation_only=True)
         if len(item) == 3:
             shape, dtype, third = item
+            if isinstance(third, TensorViewSpec):
+                # layout and memref are stored on the annotation object; stride is only
+                # meaningful at AST-parse time inside @pl.function and is not retained here.
+                return cls(shape, dtype, layout=third.layout, memref=third.memref, _annotation_only=True)
             if isinstance(third, MemRef):
                 return cls(shape, dtype, memref=third, _annotation_only=True)
             return cls(shape, dtype, layout=third, _annotation_only=True)
@@ -169,4 +204,4 @@ class Tensor(metaclass=TensorMeta):
         return f"Tensor[[{self.shape}], {self.dtype}]"
 
 
-__all__ = ["Tensor"]
+__all__ = ["Tensor", "TensorViewSpec"]

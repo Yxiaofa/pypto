@@ -241,12 +241,14 @@ class TypeResolver:
         if not isinstance(slice_value, ast.Tuple) or len(slice_value.elts) not in valid_counts:
             if type_name == "Tensor":
                 message = (
-                    f"{type_name} subscript requires [shape, dtype], [shape, dtype, layout_or_memref], "
+                    f"{type_name} subscript requires [shape, dtype], "
+                    f"[shape, dtype, layout_or_memref_or_view], "
                     f"or [shape, dtype, layout, memref], got: {ast.unparse(slice_value)}"
                 )
                 hint = (
                     "Use pl.Tensor[[shape], dtype], pl.Tensor[[shape], dtype, layout], "
-                    "or pl.Tensor[[shape], dtype, pl.MemRef(...)] format"
+                    "pl.Tensor[[shape], dtype, pl.MemRef(...)], "
+                    "or pl.Tensor[[shape], dtype, pl.view(...)] format"
                 )
             else:
                 message = (
@@ -270,7 +272,7 @@ class TypeResolver:
                 return ir.TileType(shape, dtype)
             return ir.TensorType(shape, dtype)
 
-        # 3 args: [shape, dtype, layout_or_memref] for Tensor, [shape, dtype, memref] for Tile
+        # 3 args: [shape, dtype, layout_or_memref_or_view] for Tensor, [shape, dtype, memref] for Tile
         if n_elts == 3:
             third = slice_value.elts[2]
             if type_name == "Tile":
@@ -281,7 +283,11 @@ class TypeResolver:
                     )
                 memref = self.resolve_memref(third)
                 return ir.TileType(shape, dtype, memref)
-            # Tensor: disambiguate 3rd arg
+            # Tensor: check for pl.view(...) view spec first
+            if self._is_view_node(third):
+                tensor_view, memref = self.resolve_view_spec(third)
+                return ir.TensorType(shape, dtype, memref, tensor_view)
+            # Tensor: disambiguate 3rd arg (backward compat)
             if self._is_memref_node(third):
                 memref = self.resolve_memref(third)
                 return ir.TensorType(shape, dtype, memref)
@@ -437,7 +443,7 @@ class TypeResolver:
             ParserTypeError: If shape cannot be parsed
         """
         if isinstance(shape_node, (ast.Tuple, ast.List)):
-            return self._parse_shape_elements(shape_node.elts)
+            return self._parse_dim_elements(shape_node.elts)
 
         # Handle variable name or arbitrary expression that resolves to a list/tuple
         if isinstance(shape_node, ast.Name):
@@ -513,14 +519,16 @@ class TypeResolver:
             span=span,
         )
 
-    def _parse_shape_elements(self, elts: list[ast.expr]) -> list[int | ir.Expr]:
-        """Parse individual shape dimension elements.
+    def _parse_dim_elements(self, elts: list[ast.expr]) -> list[int | ir.Expr]:
+        """Parse a list of dimension elements (int literal, variable, or evaluable expression).
+
+        Used by both shape and stride parsing since both follow identical element syntax.
 
         Args:
             elts: List of AST expression nodes for each dimension
 
         Returns:
-            List of shape dimensions
+            List of dimensions
         """
         dims: list[int | ir.Expr] = []
         for elt in elts:
@@ -535,9 +543,9 @@ class TypeResolver:
                     dims.append(self._validate_dim_value(value, ast.unparse(elt), self._get_span(elt)))
                 else:
                     raise ParserTypeError(
-                        f"Shape dimension must be int literal, variable, or evaluable expression: "
+                        f"Dimension must be int literal, variable, or evaluable expression: "
                         f"{ast.unparse(elt)}",
-                        hint="Use integer literals, variables, or expressions for shape dimensions",
+                        hint="Use integer literals, variables, or expressions for dimensions",
                     )
         return dims
 
@@ -747,6 +755,105 @@ class TypeResolver:
         return (isinstance(func, ast.Attribute) and func.attr == "MemRef") or (
             isinstance(func, ast.Name) and func.id == "MemRef"
         )
+
+    def _is_view_node(self, node: ast.expr) -> bool:
+        """Check if an AST node is a pl.view(...) or view(...) call."""
+        if not isinstance(node, ast.Call):
+            return False
+        func = node.func
+        return (isinstance(func, ast.Attribute) and func.attr == "view") or (
+            isinstance(func, ast.Name) and func.id == "view"
+        )
+
+    def resolve_view_spec(self, node: ast.expr) -> "tuple[ir.TensorView, ir.MemRef | None]":
+        """Resolve a pl.view(layout=..., stride=[...], memref=...) call to (TensorView, memref).
+
+        Args:
+            node: AST Call node for pl.view(...)
+
+        Returns:
+            Tuple of (TensorView, memref or None)
+
+        Raises:
+            ParserTypeError: If the view call is malformed
+        """
+        if not isinstance(node, ast.Call):
+            raise ParserTypeError(
+                f"Expected pl.view(...) call, got: {ast.unparse(node)}",
+                hint="Use pl.view(layout=pl.NZ, stride=[s0, s1])",
+            )
+
+        span = self._get_span(node)
+
+        if node.args:
+            raise ParserTypeError(
+                "pl.view() does not accept positional arguments",
+                span=span,
+                hint="Use keyword arguments: pl.view(layout=pl.NZ, stride=[s0, s1], memref=pl.MemRef(...))",
+            )
+
+        layout: ir.TensorLayout | None = None
+        stride_exprs: list[ir.Expr] = []
+        memref: ir.MemRef | None = None
+
+        for keyword in node.keywords:
+            if keyword.arg == "layout":
+                layout = self.resolve_layout(keyword.value)
+            elif keyword.arg == "stride":
+                stride_exprs = self._parse_stride(keyword.value, span)
+            elif keyword.arg == "memref":
+                if not self._is_memref_node(keyword.value):
+                    raise ParserTypeError(
+                        "pl.view() memref argument must be pl.MemRef(...)",
+                        span=span,
+                        hint="Use pl.view(memref=pl.MemRef(...))",
+                    )
+                memref = self.resolve_memref(keyword.value)
+            else:
+                raise ParserTypeError(
+                    f"pl.view() got unexpected keyword argument '{keyword.arg}'",
+                    span=span,
+                    hint="Valid arguments are: layout, stride, memref",
+                )
+
+        # Default to ND layout when none is specified
+        if layout is None:
+            layout = ir.TensorLayout.ND
+
+        return ir.TensorView(stride_exprs, layout), memref
+
+    def _parse_stride(self, node: ast.expr, span: "ir.Span") -> "list[ir.Expr]":
+        """Parse stride from an AST list node.
+
+        Each element is parsed like a shape dimension (int literal, variable, or
+        evaluable expression), then converted to ir.Expr (ConstInt for integers).
+
+        Args:
+            node: AST List node containing stride elements
+            span: Source span for error messages
+
+        Returns:
+            List of ir.Expr stride values
+
+        Raises:
+            ParserTypeError: If stride cannot be parsed
+        """
+        if not isinstance(node, ast.List):
+            raise ParserTypeError(
+                f"pl.view() stride must be a list, got: {ast.unparse(node)}",
+                span=span,
+                hint="Use stride=[s0, s1] with integer literals or variables",
+            )
+
+        elems = self._parse_dim_elements(node.elts)
+        # Convert all int dims to ConstInt so stride is always list[ir.Expr]
+        result: list[ir.Expr] = []
+        for dim in elems:
+            if isinstance(dim, int):
+                result.append(ir.ConstInt(dim, DataType.INDEX, ir.Span.unknown()))
+            else:
+                result.append(dim)
+        return result
 
     def resolve_memref(self, node: ast.expr) -> "ir.MemRef":
         """Resolve a pl.MemRef(memory_space, addr, size, id) AST call to ir.MemRef.

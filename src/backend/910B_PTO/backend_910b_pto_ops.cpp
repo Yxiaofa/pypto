@@ -511,7 +511,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.load")
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.store")
-    .set_pipe(ir::PipeType::MTE2)
+    .set_pipe(ir::PipeType::MTE3)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockStoreCodegenPTO(op, codegen);
     });
@@ -641,6 +641,72 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.reshape")
       return std::string("");
     });
 
+// Helper function for block.get_block_idx
+static std::string MakeBlockGetBlockIdxCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 0) << "block.get_block_idx requires no arguments";
+
+  // Create a new SSA variable for the scalar result
+  std::string result = codegen.NewTemp();
+  codegen.Emit(result + " = pto.get_block_idx");
+
+  // Register the result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.get_block_idx")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockGetBlockIdxCodegenPTO(op, codegen);
+    });
+
+// Helper function for block.get_subblock_idx
+static std::string MakeBlockGetSubblockIdxIdxCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 0) << "block.get_subblock_idx requires no arguments";
+
+  // Create a new SSA variable for the scalar result
+  std::string result = codegen.NewTemp();
+  codegen.Emit(result + " = pto.get_subblock_idx");
+
+  // Register the result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.get_subblock_idx")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockGetSubblockIdxIdxCodegenPTO(op, codegen);
+    });
+
+// Helper function for block.index_cast
+static std::string MakeBlockIndexCastCodegenPTO(const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.size() == 1) << "block.index_cast requires 1 argument";
+
+  std::string idx = codegen.GetExprAsCode(op->args_[0]);
+
+  // Create a new SSA variable for the result
+  std::string result = codegen.NewTemp();
+
+  // Emit arith.index_cast operation
+  codegen.Emit(result + " = arith.index_cast " + idx + " : i64 to index");
+
+  // Register result variable mapping
+  codegen.SetVarMlirName(codegen.GetCurrentResultVarName(), result);
+
+  return "";
+}
+
+REGISTER_BACKEND_OP(Backend910B_PTO, "block.index_cast")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeBlockIndexCastCodegenPTO(op, codegen);
+    });
+
 // ptr.make_tensor: emit pto.make_tensor_view in function body
 static std::string MakePtrMakeTensorCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
@@ -711,47 +777,57 @@ static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::Codeg
       wait_pipe_val = std::any_cast<int>(value);
     }
   }
-
-  if (aiv_only) {
+  if (arch_val == "dav-2201") {
+    codegen.Emit("pto.barrier #pto.pipe<PIPE_ALL>");
+    if (aiv_only) {
+      // codegen.Emit("pto.sync.set #pto.pipe<PIPE_FIX>, 2817");
+      // codegen.Emit("pto.sync.wait 14");
+      return "";
+    }
+    // AIC
+    codegen.Emit("pto.section.cube {");
+    codegen.Emit("pto.sync.wait ins(12)");
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_FIX>, 2817");
+    codegen.Emit("pto.sync.wait ins(12)");
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3361");
+    codegen.Emit("}");
+    // AIV
     codegen.Emit("pto.section.vector {");
-    std::string trigger_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(trigger_pipe_val));
-    codegen.Emit("pto.barrier #pto.pipe<PIPE_" + trigger_pipe_str + ">");
-    if (trigger_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3585");
-    } else {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_" + trigger_pipe_str + ">, 3585");
-    }
-    if (wait_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
-      codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 14");
-    } else {
-      std::string wait_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(wait_pipe_val));
-      codegen.Emit("pto.sync.wait #pto.pipe<PIPE_" + wait_pipe_str + ">, 14");
-    }
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3105");
+    codegen.Emit("pto.sync.wait ins(13)");
     codegen.Emit("}");
   } else {
+    if (aiv_only) {
+      codegen.Emit("pto.section.vector {");
+      std::string trigger_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(trigger_pipe_val));
+      codegen.Emit("pto.barrier #pto.pipe<PIPE_" + trigger_pipe_str + ">");
+      if (trigger_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+        codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3585");
+      } else {
+        codegen.Emit("pto.sync.set #pto.pipe<PIPE_" + trigger_pipe_str + ">, 3585");
+      }
+      if (wait_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+        codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 14");
+      } else {
+        std::string wait_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(wait_pipe_val));
+        codegen.Emit("pto.sync.wait #pto.pipe<PIPE_" + wait_pipe_str + ">, 14");
+      }
+      codegen.Emit("}");
+      return "";
+    }
     codegen.Emit("pto.barrier #pto.pipe<PIPE_ALL>");
     // AIC
     codegen.Emit("pto.section.cube {");
     codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 12");
-    if (arch_val == "dav-3510") {
-      codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 28");
-    }
+    codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 28");
     codegen.Emit("pto.sync.set #pto.pipe<PIPE_FIX>, 2817");
     codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 11");
-    if (arch_val == "dav-2201") {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3361");
-    } else {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_S>, 13");
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_S>, 29");
-    }
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_S>, 13");
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_S>, 29");
     codegen.Emit("}");
     // AIV
     codegen.Emit("pto.section.vector {");
-    if (arch_val == "dav-2201") {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 3105");
-    } else {
-      codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 12");
-    }
+    codegen.Emit("pto.sync.set #pto.pipe<PIPE_MTE3>, 12");
     codegen.Emit("pto.sync.wait #pto.pipe<PIPE_S>, 13");
     codegen.Emit("}");
   }

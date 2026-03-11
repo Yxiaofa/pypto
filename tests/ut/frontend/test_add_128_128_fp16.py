@@ -26,11 +26,11 @@ import pypto.language.manual as plm
 
 # Kernel: load two tiles and add them
 @fe.kernel
-def add_kernel(
-    x: pl.Tensor[[64, 128], pl.FP16],
-    y: pl.Tensor[[64, 128], pl.FP16],
-    z: pl.Tensor[[64, 128], pl.FP16]
-) -> pl.Tensor[[64, 128], pl.FP16]:
+def add_kernel_128(
+    x: pl.Tensor[[128, 128], pl.FP16],
+    y: pl.Tensor[[128, 128], pl.FP16],
+    z: pl.Tensor[[128, 128], pl.FP16]
+) -> pl.Tensor[[128, 128], pl.FP16]:
     tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     tile_b = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
@@ -38,14 +38,16 @@ def add_kernel(
     tile_c = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     with pl.section_vector():
-        plm.load(x, [0, 0], [64, 128], out=tile_a)
+        vidx = pl.block.get_block_idx()
+        vidx_i = pl.block.index_cast(vidx)  # cast i64 to index
+        offset = vidx_i * 64
+        plm.load(x, [offset, 0], [64, 128], out=tile_a)
 
-        plm.load(y, [0, 0], [64, 128], out=tile_b)
+        plm.load(y, [offset, 0], [64, 128], out=tile_b)
 
         plm.add(tile_a, tile_b, out=tile_c)
 
-        plm.store(tile_c, [0, 0], [64, 128], z)
-        pl.system.sync_all()
+        plm.store(tile_c, [offset, 0], [64, 128], z)
     return z
 
 
@@ -58,16 +60,16 @@ def test_add():
     device = "npu"
     torch.npu.set_device(device)
 
-    shape = [64, 128]  # tensor shape hard-coded as the kernel
+    shape = [128, 128]  # tensor shape hard-coded as the kernel
     torch.manual_seed(0)
     dtype = torch.float16
     x = torch.rand(shape, device=device, dtype=dtype)
     y = torch.rand(shape, device=device, dtype=dtype)
     z = torch.empty(shape, device=device, dtype=dtype)
 
-    compiled_lib = fe.compile(add_kernel)
+    compiled_lib = fe.compile(add_kernel_128)
     print("compiled lib path:", compiled_lib.lib_path)
-    fe.launch(None, 1, compiled_lib, x, y, z)
+    fe.launch(None, 2, compiled_lib, x, y, z)
 
     torch.npu.synchronize()
 

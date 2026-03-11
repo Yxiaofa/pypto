@@ -1390,5 +1390,187 @@ class TestPtrType:
             resolver.resolve_param_type(node)
 
 
+class TestViewSpec:
+    """Tests for pl.view(layout=..., stride=[...], memref=...) in tensor annotations."""
+
+    def test_view_with_stride_only(self):
+        """pl.view(stride=[128, 1]) creates TensorType with stride-only TensorView."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view(stride=[128, 1])]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.dtype == DataType.FP32
+        assert result.tensor_view is not None
+        assert len(result.tensor_view.stride) == 2
+        # Default layout is ND when not specified
+        assert result.tensor_view.layout == ir.TensorLayout.ND
+
+    def test_view_with_layout_only(self):
+        """pl.view(layout=pl.NZ) creates TensorType with layout and empty stride."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view(layout=pl.NZ)]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+        assert len(result.tensor_view.stride) == 0
+
+    def test_view_with_layout_and_stride(self):
+        """pl.view(layout=pl.NZ, stride=[128, 1]) sets both layout and stride."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64, 128], pl.FP32, pl.view(layout=pl.NZ, stride=[128, 1])]", mode="eval"
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.dtype == DataType.FP32
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+        assert len(result.tensor_view.stride) == 2
+
+    def test_view_stride_elements_are_expr(self):
+        """Stride elements are converted to ir.Expr (ConstInt for literals)."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64, 128], pl.FP32, pl.view(stride=[128, 1])]", mode="eval"
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert result.tensor_view is not None
+        strides = result.tensor_view.stride
+        assert all(isinstance(s, ir.Expr) for s in strides)
+
+    def test_view_stride_with_dynamic_variable(self):
+        """pl.view(stride=[M, 1]) with dynamic stride variable creates Var expr."""
+        resolver = _make_resolver(closure_vars={"M": DynVar("M")})
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view(stride=[M, 1])]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert result.tensor_view is not None
+        strides = result.tensor_view.stride
+        assert len(strides) == 2
+        assert isinstance(strides[0], ir.Var)
+        assert strides[0].name == "M"
+
+    def test_view_bare_name(self):
+        """view(...) without pl. prefix also works."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, view(layout=pl.NZ)]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_view_positional_args_raises(self):
+        """pl.view() with positional args raises ParserTypeError."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view(pl.NZ)]", mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="does not accept positional arguments"):
+            resolver.resolve_type(node)
+
+    def test_view_invalid_kwarg_raises(self):
+        """pl.view() with unknown keyword raises ParserTypeError."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64, 128], pl.FP32, pl.view(unknown=1)]", mode="eval"
+        ).body
+
+        with pytest.raises(ParserTypeError, match="unexpected keyword argument"):
+            resolver.resolve_type(node)
+
+    def test_view_stride_non_list_raises(self):
+        """pl.view(stride=128) with non-list stride raises ParserTypeError."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view(stride=128)]", mode="eval").body
+
+        with pytest.raises(ParserTypeError, match="stride must be a list"):
+            resolver.resolve_type(node)
+
+    def test_view_with_memref(self):
+        """pl.view(layout=..., stride=[...], memref=...) sets all three fields."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64], pl.FP32, pl.view(layout=pl.NZ, stride=[64], "
+            "memref=pl.MemRef(pl.MemorySpace.DDR, 0, 1024, 0))]",
+            mode="eval",
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+        assert len(result.tensor_view.stride) == 1
+        assert result.memref is not None
+
+    def test_view_no_args(self):
+        """pl.view() with no arguments uses ND layout and empty stride."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.view()]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.ND
+        assert len(result.tensor_view.stride) == 0
+
+    def test_backward_compat_bare_layout(self):
+        """Old pl.Tensor[[shape], dtype, pl.NZ] syntax still works."""
+        resolver = _make_resolver()
+        node = ast.parse("pl.Tensor[[64, 128], pl.FP32, pl.NZ]", mode="eval").body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.tensor_view is not None
+        assert result.tensor_view.layout == ir.TensorLayout.NZ
+
+    def test_backward_compat_memref(self):
+        """Old pl.Tensor[[shape], dtype, pl.MemRef(...)] syntax still works."""
+        resolver = _make_resolver()
+        node = ast.parse(
+            "pl.Tensor[[64], pl.FP32, pl.MemRef(pl.MemorySpace.DDR, 0, 1024, 0)]", mode="eval"
+        ).body
+        result = resolver.resolve_type(node)
+
+        assert isinstance(result, ir.TensorType)
+        assert result.memref is not None
+        assert result.tensor_view is None
+
+    def test_view_via_pl_function(self):
+        """@pl.function with pl.view(layout=..., stride=[...]) annotation works end-to-end."""
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64, 128], pl.FP32, pl.view(layout=pl.NZ, stride=[128, 1])],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            return x
+
+        assert isinstance(func, ir.Function)
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert param_type.tensor_view.layout == ir.TensorLayout.NZ
+        assert len(param_type.tensor_view.stride) == 2
+
+    def test_view_stride_only_via_pl_function(self):
+        """@pl.function with pl.view(stride=[...]) only (no explicit layout)."""
+
+        @pl.function
+        def func(
+            x: pl.Tensor[[64, 128], pl.FP32, pl.view(stride=[128, 1])],
+        ) -> pl.Tensor[[64, 128], pl.FP32]:
+            return x
+
+        param_type = func.params[0].type
+        assert isinstance(param_type, ir.TensorType)
+        assert param_type.tensor_view is not None
+        assert len(param_type.tensor_view.stride) == 2
+        assert param_type.tensor_view.layout == ir.TensorLayout.ND
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

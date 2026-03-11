@@ -41,7 +41,18 @@ from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
 from . import parser
-from .dsl_api import cond, const, incore, parallel, range, unroll, section_cube, section_vector, while_, yield_
+from .dsl_api import (
+    cond,
+    const,
+    incore,
+    parallel,
+    range,
+    section_cube,
+    section_vector,
+    unroll,
+    while_,
+    yield_,
+)
 from .op import block_ops as block
 from .op import system_ops as system
 from .op import tensor_ops as tensor
@@ -57,7 +68,6 @@ from .op.block_ops import (
     col_expand_div,
     col_expand_mul,
     col_expand_sub,
-    make_tile,
     expands,
     gemv,
     gemv_acc,
@@ -66,6 +76,7 @@ from .op.block_ops import (
     load,
     log,
     lrelu,
+    make_tile,
     matmul_acc,
     matmul_bias,
     max,
@@ -105,8 +116,8 @@ from .op.block_ops import (
     xor,
     xors,
 )
-from .op.tensor_ops import assemble, create_tensor, dim
 from .op.ptr_ops import addptr, make_tensor
+from .op.tensor_ops import assemble, create_tensor, dim
 from .op.unified_ops import (
     add,
     cast,
@@ -120,11 +131,11 @@ from .op.unified_ops import (
     row_sum,
     sub,
     transpose,
-    view,
 )
 from .parser.decorator import InlineFunction, function, inline, program
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, Out, Ptr, Scalar, Tensor, Tile, dynamic
+from .typing.tensor import TensorViewSpec as view
 
 # Re-export TensorLayout constants for convenience
 ND = TensorLayout.ND

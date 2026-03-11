@@ -139,7 +139,8 @@ class MemRefUpdateMutator : public IRMutator {
       if (tensor_type->memref_.has_value()) {
         auto it = memref_map_.find(tensor_type->memref_.value().get());
         if (it != memref_map_.end()) {
-          return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, it->second);
+          return std::make_shared<TensorType>(tensor_type->shape_, tensor_type->dtype_, it->second,
+                                              tensor_type->tensor_view_);
         }
       }
     } else if (auto tile_type = std::dynamic_pointer_cast<const TileType>(type)) {

@@ -696,6 +696,54 @@ class TestMakeTensorCodegen:
         assert view_pos < return_pos, "make_tensor_view must appear before return"
 
 
+class TestTensorStrideCodegen:
+    """Tests for pl.view(stride=[...]) annotation generating correct strides in make_tensor_view."""
+
+    def test_tensor_param_with_custom_stride(self):
+        """Tensor param with pl.view(stride=[...]) uses user-specified strides."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.PTO)
+
+        @pl.program
+        class CustomStrideProgram:
+            @pl.function
+            def custom_stride_func(self, a: pl.Tensor[[64, 64], pl.FP32, pl.view(stride=[128, 1])]):
+                tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+                pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=a)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        transformed_program = pm.run_passes(CustomStrideProgram)
+
+        codegen_obj = PTOCodegen()
+        mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+        assert "shape = [%c64, %c64]" in mlir_code
+        # User-specified stride [128, 1] must appear, NOT the default [64, 1]
+        assert "strides = [%c128, %c1]" in mlir_code
+
+    def test_tensor_param_without_stride_uses_default(self):
+        """Tensor param without pl.view stride uses default row-major stride."""
+        backend.reset_for_testing()
+        backend.set_backend_type(BackendType.PTO)
+
+        @pl.program
+        class DefaultStrideProgram:
+            @pl.function
+            def default_stride_func(self, a: pl.Tensor[[64, 64], pl.FP32]):
+                tile = pl.load(a, offsets=[0, 0], shapes=[32, 32])
+                pl.store(tile, offsets=[0, 0], shapes=[32, 32], output_tensor=a)
+
+        pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+        transformed_program = pm.run_passes(DefaultStrideProgram)
+
+        codegen_obj = PTOCodegen()
+        mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+        assert "shape = [%c64, %c64]" in mlir_code
+        # Default stride for [64, 64] is [64, 1]
+        assert "strides = [%c64, %c1]" in mlir_code
+
+
 class TestAddPtrCodegen:
     """Tests for pl.addptr generating pto.addptr in ptoas codegen."""
 

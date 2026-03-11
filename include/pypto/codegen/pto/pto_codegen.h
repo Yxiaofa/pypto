@@ -247,6 +247,7 @@ class PTOCodegen : public CodegenBase {
   std::ostringstream constants_section_;
   std::ostringstream body_section_;
   int indent_level_ = 0;
+  int function_body_indent_level_ = 0;
 
   // Variable mappings
   std::map<std::string, std::string> var_to_mlir_;
