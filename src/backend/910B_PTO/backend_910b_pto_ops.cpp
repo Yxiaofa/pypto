@@ -511,7 +511,7 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "block.load")
     });
 
 REGISTER_BACKEND_OP(Backend910B_PTO, "block.store")
-    .set_pipe(ir::PipeType::MTE2)
+    .set_pipe(ir::PipeType::MTE3)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeBlockStoreCodegenPTO(op, codegen);
     });

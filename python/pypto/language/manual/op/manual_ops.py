@@ -148,6 +148,46 @@ def load(
     )
 
 
+def load_tile(
+    out: Tile,
+    tensor: Tensor,
+    tile_offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
+) -> None:
+    """Load data from a global tensor into a pre-allocated tile using tile-relative offsets.
+
+    This is a convenience wrapper around :func:`load` that accepts tile-relative
+    offsets instead of absolute tensor offsets. The absolute offset is computed as:
+    ``absolute_offset[i] = tile_offsets[i] * shapes[i]``
+
+    Args:
+        out: Pre-allocated destination tile; rebound on return.
+        tensor: Source global tensor.
+        tile_offsets: Per-dimension offsets in units of tiles (relative to tile shape).
+        shapes: Number of elements to load in each dimension (tile shape).
+
+    Example:
+        >>> tile_a = plm.create_tile([64, 128], dtype=pl.FP16, ...)
+        >>> # These two calls are equivalent:
+        >>> plm.load(a, [128, 128], [64, 128], out=tile_a)       # absolute offset
+        >>> plm.load_tile(tile_a, a, [2, 1], [64, 128])           # tile-relative offset
+        >>> # absolute_offset = [2*64, 1*128] = [128, 128]
+    """
+    if len(tile_offsets) != len(shapes):
+        raise ValueError(
+            f"tile_offsets and shapes must have same number of dimensions, "
+            f"got {len(tile_offsets)} tile_offsets and {len(shapes)} shapes"
+        )
+
+    abs_offsets = [t_off * shape for t_off, shape in zip(tile_offsets, shapes)]
+
+    _op(
+        "manual.load",
+        [tensor.unwrap(), _to_make_tuple(abs_offsets), _to_make_tuple(shapes)],
+        out
+    )
+
+
 def store(
     tile: Tile,
     offsets: Sequence[int | Expr],
@@ -170,6 +210,38 @@ def store(
         Tensor wrapping the store result.
     """
     return Tensor(expr=_ir_block_ops.store(tile.unwrap(), offsets, shapes, output_tensor.unwrap()))
+
+
+def store_tile(
+    output_tensor: Tensor,
+    tile: Tile,
+    tile_offsets: Sequence[int | Expr],
+    shapes: Sequence[int | Expr],
+) -> Tensor:
+    """Store data from a tile back to a global tensor using tile-relative offsets.
+
+    This is a convenience wrapper around :func:`store` that accepts tile-relative
+    offsets instead of absolute tensor offsets. The absolute offset is computed as:
+    ``absolute_offset[i] = tile_offsets[i] * shapes[i]``
+
+    Args:
+        output_tensor: Destination tensor.
+        tile: Source tile.
+        tile_offsets: Per-dimension offsets in units of tiles (relative to tile shape).
+        shapes: Shape of the region to store (tile shape).
+
+    Returns:
+        Tensor wrapping the store result.
+
+    Example:
+        >>> tile_a = plm.create_tile([64, 128], dtype=pl.FP16, ...)
+        >>> # These two calls are equivalent:
+        >>> plm.store(tile_a, [128, 256], [64, 128], out_tensor)    # absolute offset
+        >>> plm.store_tile(out_tensor, tile_a, [2, 2], [64, 128])   # tile-relative offset
+        >>> # absolute_offset = [2*64, 2*128] = [128, 256]
+    """
+    abs_offsets = [t_off * shape for t_off, shape in zip(tile_offsets, shapes)]
+    return Tensor(expr=_ir_block_ops.store(tile.unwrap(), abs_offsets, shapes, output_tensor.unwrap()))
 
 
 def l0c_store(
@@ -664,7 +736,8 @@ __all__ = [
     # Allocation
     "make_tile",
     # Memory
-    "load", "store", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx", "get_subblock_idx",
+    "load", "load_tile", "store", "store_tile", "l0c_store", "move", "ub_copy", "full", "fillpad", "get_block_idx", 
+    "get_subblock_idx",
     # Tile x Tile binary
     "add", "sub", "mul", "div", "rem", "maximum", "minimum",
     "and_", "or_", "shl", "shr",

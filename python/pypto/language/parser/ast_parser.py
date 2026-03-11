@@ -1970,6 +1970,14 @@ class ASTParser:
         if op_name in self._MANUAL_AS_BLOCK_OPS:
             return self._parse_block_op(op_name, call)
 
+        # load_tile: output-first syntax, compute abs_offsets = tile_offsets * shapes, then call manual.load
+        if op_name == "load_tile":
+            return self._parse_load_tile_op(call, span)
+
+        # store_tile: output-first syntax, compute abs_offsets = tile_offsets * shapes, then call block.store
+        if op_name == "store_tile":
+            return self._parse_store_tile_op(call, span)
+
         # All other manual ops require an explicit output tile via dst=/out=.
         args = [self.parse_expression(arg) for arg in call.args]
 
@@ -2002,6 +2010,84 @@ class ASTParser:
         # PTO backend (which expects Var nodes for tile arguments).
 
         return result_expr
+
+    def _parse_load_tile_op(self, call: ast.Call, span: ir.Span) -> ir.Expr:
+        """Parse plm.load_tile with output-first signature.
+
+        Signature:
+            plm.load_tile(out_tile, tensor, tile_offsets, shapes)
+        """
+        args = [self.parse_expression(arg) for arg in call.args]
+
+        if call.keywords:
+            raise InvalidOperationError(
+                "Manual op 'plm.load_tile' does not accept keyword arguments",
+                span=span,
+                hint="Use: plm.load_tile(out_tile, tensor, tile_offsets, shapes)",
+            )
+
+        if len(args) != 4:
+            raise InvalidOperationError(
+                f"Manual op 'plm.load_tile' expects 4 positional arguments, got {len(args)}",
+                span=span,
+                hint="Use: plm.load_tile(out_tile, tensor, tile_offsets, shapes)",
+            )
+
+        dst_expr, tensor, tile_offsets_tuple, shapes_tuple = args[0], args[1], args[2], args[3]
+
+        abs_offsets = []
+        for i in range(len(tile_offsets_tuple.elements)):
+            tile_off = tile_offsets_tuple.elements[i]
+            shape = shapes_tuple.elements[i]
+            if isinstance(tile_off, ir.ConstInt) and isinstance(shape, ir.ConstInt):
+                abs_off = ir.ConstInt(tile_off.value * shape.value, DataType.INT64, span)
+            else:
+                abs_off = ir.Mul(tile_off, shape, DataType.INT64, span)
+            abs_offsets.append(abs_off)
+
+        abs_offsets_tuple = ir.MakeTuple(abs_offsets, span)
+
+        return ir.create_op_call(
+            "manual.load", [tensor, abs_offsets_tuple, shapes_tuple, dst_expr], {}, span
+        )
+
+    def _parse_store_tile_op(self, call: ast.Call, span: ir.Span) -> ir.Expr:
+        """Parse plm.store_tile with output-first signature.
+
+        Signature:
+            plm.store_tile(output_tensor, tile, tile_offsets, shapes)
+        """
+        args = [self.parse_expression(arg) for arg in call.args]
+
+        if call.keywords:
+            raise InvalidOperationError(
+                "Manual op 'plm.store_tile' does not accept keyword arguments",
+                span=span,
+                hint="Use: plm.store_tile(output_tensor, tile, tile_offsets, shapes)",
+            )
+
+        if len(args) != 4:
+            raise InvalidOperationError(
+                f"Manual op 'plm.store_tile' expects 4 positional arguments, got {len(args)}",
+                span=span,
+                hint="Use: plm.store_tile(output_tensor, tile, tile_offsets, shapes)",
+            )
+
+        output_tensor, tile, tile_offsets_tuple, shapes_tuple = args[0], args[1], args[2], args[3]
+
+        abs_offsets = []
+        for i in range(len(tile_offsets_tuple.elements)):
+            tile_off = tile_offsets_tuple.elements[i]
+            shape = shapes_tuple.elements[i]
+            if isinstance(tile_off, ir.ConstInt) and isinstance(shape, ir.ConstInt):
+                abs_off = ir.ConstInt(tile_off.value * shape.value, DataType.INT64, span)
+            else:
+                abs_off = ir.Mul(tile_off, shape, DataType.INT64, span)
+            abs_offsets.append(abs_off)
+
+        abs_offsets_tuple = ir.MakeTuple(abs_offsets, span)
+
+        return ir_op.block.store(tile, abs_offsets_tuple, shapes_tuple, output_tensor, span=span)
 
     # Maps unified op names to the scalar variant for block ops.
     # Only binary arithmetic ops have scalar auto-dispatch.

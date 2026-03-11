@@ -170,7 +170,11 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   body_section_.str("");
   body_section_.clear();
 
+  indent_level_ = 0;
+  function_body_indent_level_ = 0;
+
   stream_ << "module {\n";
+  indent_level_++;
 
   for (const auto& [gvar, func] : program->functions_) {
     if (func->func_type_ == ir::FunctionType::Orchestration) {
@@ -182,6 +186,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
     GenerateFunction(func);
   }
 
+  indent_level_--;
   stream_ << "}\n";
   return stream_.str();
 }
@@ -203,6 +208,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   constants_section_.clear();
   body_section_.str("");
   body_section_.clear();
+  function_body_indent_level_ = 0;
 
   BuildVarToMemRefMapping(func);
 
@@ -235,7 +241,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     }
   }
 
-  stream_ << "  func.func @" << func->name_ << "(";
+  stream_ << GetIndent() << "func.func @" << func->name_ << "(";
 
   std::set<std::string> param_names;
   for (size_t i = 0; i < func->params_.size(); i++) {
@@ -269,6 +275,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
 
   stream_ << ") {\n";
   indent_level_++;
+  function_body_indent_level_ = indent_level_;
 
   for (const auto& [var_name, memref_ptr] : var_to_memref_) {
     if (param_names.find(var_name) == param_names.end()) {
@@ -315,7 +322,8 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   stream_ << GetIndent() << "return\n";
 
   indent_level_--;
-  stream_ << "  }\n";
+  stream_ << GetIndent() << "}\n";
+  function_body_indent_level_ = 0;
 }
 
 void PTOCodegen::BuildVarToMemRefMapping(const FunctionPtr& func) {
@@ -359,7 +367,7 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
           stream_ << GetOrEmitIndexConstant(GetConstIntValue(tensor_type->shape_[j]));
         }
       }
-      stream_ << "]";
+      stream_ << "],";
 
       stream_ << " strides = [";
       const bool has_custom_stride = tensor_type->tensor_view_.has_value() &&
@@ -433,7 +441,7 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
     if (memref->addr_) {
       if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
         if (const_addr->value_ != 0) {
-          stream_ << " base_addr = " << const_addr->value_;
+          line << " addr = " << const_addr->value_;
         }
       }
     }
@@ -453,7 +461,9 @@ std::string PTOCodegen::GetIndent() const { return std::string(static_cast<size_
 std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
   std::string name = "%c" + std::to_string(value);
   if (emitted_constants_.find(value) == emitted_constants_.end()) {
-    constants_section_ << GetIndent() << name << " = arith.constant " << value << " : index\n";
+    const int constants_indent_level = function_body_indent_level_ > 0 ? function_body_indent_level_ : indent_level_;
+    constants_section_ << std::string(static_cast<size_t>(constants_indent_level) * 2, ' ')
+                       << name << " = arith.constant " << value << " : index\n";
     emitted_constants_.insert(value);
   }
   return name;
@@ -622,8 +632,9 @@ std::string PTOCodegen::GetOrEmitFloatConstant(double value, const std::string& 
     std::ostringstream val_str;
     val_str << std::scientific << std::setprecision(6) << value;
 
-    constants_section_ << GetIndent() << name << " = arith.constant " << val_str.str() << " : " << mlir_type
-                       << "\n";
+    const int constants_indent_level = function_body_indent_level_ > 0 ? function_body_indent_level_ : indent_level_;
+    constants_section_ << std::string(static_cast<size_t>(constants_indent_level) * 2, ' ')
+                       << name << " = arith.constant " << val_str.str() << " : " << mlir_type << "\n";
     emitted_float_constants_.insert(value);
     float_const_names_[value] = name;
     return name;
