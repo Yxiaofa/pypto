@@ -14,7 +14,7 @@ type wrappers (they take/return no Tensor/Tile/Scalar), so this is a
 straight pass-through.
 """
 
-from pypto.ir.op.system_ops import bar_all, bar_m, bar_v, sync_dst, sync_src, sync_all
+from pypto.ir.op.system_ops import bar_all, bar_m, bar_v, sync_dst, sync_src, sync_all, set_cross_core, wait_cross_core
 
 __all__ = [
     "sync_src",
@@ -22,5 +22,7 @@ __all__ = [
     "bar_v",
     "bar_m",
     "bar_all",
+    "set_cross_core",
+    "wait_cross_core",
     "sync_all"
 ]

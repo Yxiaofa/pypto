@@ -359,7 +359,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     # need https://github.com/zhangstevenunity/PTOAS/issues/10
     # Note: --pto-level=level3 is required for addr operand support
     result = subprocess.run(
-        ["ptoas", ir_path, "--enable-insert-sync", "--pto-level=level3", "-o", raw_cpp_path],
+        ["ptoas", ir_path, "--enable-insert-sync", "-o", raw_cpp_path],
         check=False, timeout=timeout, capture_output=True
     )
     if result.returncode != 0:

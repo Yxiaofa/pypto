@@ -44,13 +44,14 @@ def add_kernel_128(
         plm.load(x, [offset, 0], [64, 128], out=tile_a)
         plm.load(y, [offset, 0], [64, 128], out=tile_b)
         # Sync: wait for load (MTE2) to complete before compute (V)
-        pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
-        pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+        # pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+        # pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
         plm.add(tile_a, tile_b, out=tile_c)
         # Sync: wait for compute (V) to complete before store (MTE3)
-        pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-        pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+        # pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+        # pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
         plm.store(tile_c, [offset, 0], [64, 128], z)
+        pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=0)
     return z
 
 
@@ -60,7 +61,7 @@ def add_kernel_128(
 
 @fe.jit()
 def test_add():
-    device = "npu"
+    device = "npu:2"
     torch.npu.set_device(device)
 
     shape = [128, 128]  # tensor shape hard-coded as the kernel
