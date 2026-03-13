@@ -201,6 +201,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   memref_to_tile_type_.clear();
   emitted_constants_.clear();
   emitted_float_constants_.clear();
+  emitted_i64_constants_.clear();
   float_const_names_.clear();
   extra_alloc_tiles_.clear();
   extra_tile_buf_types_.clear();
@@ -314,10 +315,21 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   std::string body_content = stream_.str();
   stream_ = std::move(saved_stream);
 
-  stream_ << constants_section_.str();
+  // Step 1: Emit AllocTiles to a temporary buffer to collect i64 constants for addr operands
+  std::ostringstream alloc_tiles_buffer;
+  auto saved_stream_for_alloc = std::move(stream_);
+  stream_ = std::move(alloc_tiles_buffer);
   EmitMakeTensorViews(func);
   EmitAllocTiles(func, collector.GetMemRefs());
   EmitExtraAllocTiles();
+  std::string alloc_tiles_content = stream_.str();
+  stream_ = std::move(saved_stream_for_alloc);
+
+  // Step 2: Output constants_section_ FIRST (includes i64 constants for addr operands)
+  stream_ << constants_section_.str();
+  // Step 3: Then output alloc_tiles (which references the i64 constants)
+  stream_ << alloc_tiles_content;
+  // Step 4: Finally output the body
   stream_ << body_content;
   stream_ << GetIndent() << "return\n";
 
@@ -436,15 +448,18 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
 
     std::ostringstream line;
     line << tile_buf << " = pto.alloc_tile";
-    // Emit base_addr when the MemRef carries an explicit non-zero address
-    // (i.e., set by the user via block.make_tile addr= kwarg).
+    // For level3, all alloc_tile must have addr operand.
+    // If no explicit address is set, use 0 (compiler will assign).
+    std::string addr_operand;
     if (memref->addr_) {
       if (auto const_addr = As<ir::ConstInt>(memref->addr_)) {
-        if (const_addr->value_ != 0) {
-          line << " addr = " << const_addr->value_;
-        }
+        addr_operand = GetOrEmitI64Constant(const_addr->value_);
       }
     }
+    if (addr_operand.empty()) {
+      addr_operand = GetOrEmitI64Constant(0);
+    }
+    line << " addr = " << addr_operand;
     if (!valid_row_mlir.empty()) line << " valid_row = " << valid_row_mlir;
     if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
     line << " : " << GetTileBufTypeString(memref.get());
@@ -469,6 +484,15 @@ std::string PTOCodegen::GetOrEmitIndexConstant(int64_t value) {
   return name;
 }
 
+std::string PTOCodegen::GetOrEmitI64Constant(int64_t value) {
+  std::string name = "%addr" + std::to_string(value);
+  if (emitted_i64_constants_.find(value) == emitted_i64_constants_.end()) {
+    constants_section_ << GetIndent() << name << " = arith.constant " << value << " : i64\n";
+    emitted_i64_constants_.insert(value);
+  }
+  return name;
+}
+
 std::string PTOCodegen::GetTileBufForMemRef(const MemRefPtr& memref) {
   auto it = memref_to_mlir_.find(memref.get());
   INTERNAL_CHECK(it != memref_to_mlir_.end()) << "MemRef not found in mapping";
@@ -484,9 +508,11 @@ std::string PTOCodegen::AllocNewTileBuf(const std::string& tile_buf_type_string)
 
 void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { current_result_buf_ = buf; }
 
+int64_t extra_tile_addr = 0x10000;
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& [name, type_str] : extra_alloc_tiles_) {
-    stream_ << GetIndent() << name << " = pto.alloc_tile : " << type_str << "\n";
+    stream_ << GetIndent() << name << " = pto.alloc_tile addr = " << GetOrEmitI64Constant(0) << " : " << type_str << "\n";
+    extra_tile_addr += 16384;  // Increment by typical tile size
   }
 }
 

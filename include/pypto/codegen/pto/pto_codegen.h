@@ -238,6 +238,11 @@ class PTOCodegen : public CodegenBase {
   std::string GetOrEmitIndexConstant(int64_t value);
 
   /**
+   * @brief Get or emit i64 constant (for addr operand)
+   */
+  std::string GetOrEmitI64Constant(int64_t value);
+
+  /**
    * @brief Get tile_buf name for a MemRef
    */
   std::string GetTileBufForMemRef(const ir::MemRefPtr& memref);
@@ -258,6 +263,7 @@ class PTOCodegen : public CodegenBase {
   std::set<int64_t> emitted_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;
+  std::set<int64_t> emitted_i64_constants_;  // For addr operands
 
   /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
   std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;

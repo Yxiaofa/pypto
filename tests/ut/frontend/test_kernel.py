@@ -163,7 +163,7 @@ def neg_kernel(
 # ---------------------------------------------------------------------------
 @fe.jit()
 def test_load_kernel_with_jit():
-   compiled_kernel = fe.compile(load_kernel)
+    compiled_kernel = fe.compile(load_kernel)
     return
 
 def test_load_kernel():

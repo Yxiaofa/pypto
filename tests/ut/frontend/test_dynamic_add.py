@@ -25,26 +25,46 @@ def dynamic_add_kernel(
     y: pl.Tensor[[M, N], pl.FP16],
     z: pl.Tensor[[M, N], pl.FP16]
 ) -> pl.Tensor[[M, N], pl.FP16]:
-    tile_a = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
-                             addr=0x0000, size=16384)
-    tile_b = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
-                             addr=0x0000, size=16384)
-    tile_c = plm.create_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
-                             addr=0x0000, size=16384)
+    tile_type_a = plm.TileType(
+        shape=[64, 128],
+        dtype=pl.FP16,
+        target_memory=pl.MemorySpace.Vec,
+    )
+    tile_a = plm.make_tile(tile_type_a, addr=0x0000, size=16384)
+    
+    tile_type_b = plm.TileType(
+        shape=[64, 128],
+        dtype=pl.FP16,
+        target_memory=pl.MemorySpace.Vec,
+    )
+    tile_b = plm.make_tile(tile_type_b, addr=0x4000, size=16384)
+    
+    tile_type_c = plm.TileType(
+        shape=[64, 128],
+        dtype=pl.FP16,
+        target_memory=pl.MemorySpace.Vec,
+    )
+    tile_c = plm.make_tile(tile_type_c, addr=0x8000, size=16384)
+    
     with pl.section_vector():
-        m_loops = (M + 63) // 64
-        n_loops = (N + 127) // 128
-
-        for i in pl.range(m_loops):
-            for j in pl.range(n_loops):
-                m_offset = i * 64
-                n_offset = j * 128
-
-                plm.load(x, [m_offset, n_offset], [64, 128], out=tile_a)
-                plm.load(y, [m_offset, n_offset], [64, 128], out=tile_b)
+        M_dim = pl.tensor.dim(x, 0)
+        N_dim = pl.tensor.dim(x, 1)
+        
+        for i in pl.range(0, M_dim, 64):
+            for j in pl.range(0, N_dim, 128):
+                # Barrier at start: ensure previous iteration's store is complete
+                pl.system.bar_all()
+                plm.load(x, [i, j], [64, 128], out=tile_a)
+                plm.load(y, [i, j], [64, 128], out=tile_b)
+                # Sync: wait for load (MTE2) to complete before compute (V)
+                pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                 plm.add(tile_a, tile_b, out=tile_c)
-                plm.store(tile_c, [m_offset, n_offset], [64, 128], z)
-
+                # Sync: wait for compute (V) to complete before store (MTE3)
+                pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+                plm.store(tile_c, [i, j], [64, 128], z)
+        
     return z
 
 
@@ -54,7 +74,7 @@ def dynamic_add_kernel(
 
 @fe.jit()
 def test_dynamic_add():
-    compiled_lib = fe.compile(dynamic_add_kernel)
+    compiled_lib = fe.compile(dynamic_add_kernel, arch="dav-c220-vec")
     print("compiled lib path:", compiled_lib.lib_path)
 
     device = "npu:1"

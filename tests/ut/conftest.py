@@ -21,7 +21,7 @@ def set_npu_arch():
     during test execution.
     """
     original_value = os.environ.get("npu_arch")
-    os.environ["npu_arch"] = "dav-2201"
+    os.environ["npu_arch"] = "dav-c220"
     yield
     if original_value is not None:
         os.environ["npu_arch"] = original_value

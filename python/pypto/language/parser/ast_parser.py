@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pypto.ir import IRBuilder
 from pypto.ir import op as ir_op
 from pypto.pypto_core import DataType, ir
+from pypto.pypto_core.ir import MemorySpace
 
 from .diagnostics import (
     InvalidOperationError,
@@ -2331,7 +2332,7 @@ class ASTParser:
                             f"Array field '{field_name}' must be accessed with an integer index",
                             span=span,
                             hint=f"Use {obj_name}.{field_name}[0] through "
-                                 f"{obj_name}.{field_name}[{len(val) - 1}]",
+                                         f"{obj_name}.{field_name}[{len(val) - 1}]",
                         )
                     return val  # scalar ir.Var
                 raise ParserTypeError(
@@ -2339,11 +2340,40 @@ class ASTParser:
                     span=span,
                     hint=f"Valid fields are: {', '.join(field_vars.keys())}",
                 )
+            # Check for pl.MemorySpace.* attribute access (nested: pl.MemorySpace.Left)
+            if obj_name == "pl" and field_name in ("Left", "Right", "Vec", "Mat", "Acc", "Bias"):
+                memory_space_map = {
+                    "Left": MemorySpace.Left,
+                    "Right": MemorySpace.Right,
+                    "Vec": MemorySpace.Vec,
+                    "Mat": MemorySpace.Mat,
+                    "Acc": MemorySpace.Acc,
+                }
+                if field_name in memory_space_map:
+                    return ir.ConstInt(memory_space_map[field_name].value, DataType.INT64, span)
+        # Check for nested attribute access like pl.MemorySpace.Left
+        if isinstance(attr.value, ast.Attribute):
+            inner_attr = attr.value
+            if isinstance(inner_attr.value, ast.Name):
+                inner_obj_name = inner_attr.value.id
+                inner_field_name = inner_attr.attr
+                outer_field_name = attr.attr
+                # Handle pl.MemorySpace.Left, pl.MemorySpace.Right, etc.
+                if inner_obj_name == "pl" and inner_field_name == "MemorySpace":
+                    memory_space_map = {
+                        "Left": MemorySpace.Left,
+                        "Right": MemorySpace.Right,
+                        "Vec": MemorySpace.Vec,
+                        "Mat": MemorySpace.Mat,
+                        "Acc": MemorySpace.Acc,
+                    }
+                    if outer_field_name in memory_space_map:
+                        return ir.ConstInt(memory_space_map[outer_field_name].value, DataType.INT64, span)
         raise UnsupportedFeatureError(
             f"Standalone attribute access not supported: {ast.unparse(attr)}",
             span=span,
             hint="Attribute access is only supported for tiling parameters (e.g., tiling.x) "
-                 "or within function calls",
+                         "or within function calls",
         )
 
     def parse_list(self, list_node: ast.List) -> ir.MakeTuple:

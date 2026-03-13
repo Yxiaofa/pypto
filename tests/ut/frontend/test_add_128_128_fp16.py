@@ -34,19 +34,22 @@ def add_kernel_128(
     tile_a = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
                              addr=0x0000, size=16384)
     tile_b = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
-                             addr=0x0000, size=16384)
+                             addr=0x4000, size=16384)
     tile_c = plm.make_tile([64, 128], dtype=pl.FP16, target_memory=pl.MemorySpace.Vec,
-                             addr=0x0000, size=16384)
+                             addr=0x8000, size=16384)
     with pl.section_vector():
         vidx = pl.block.get_block_idx()
         vidx_i = pl.block.index_cast(vidx)  # cast i64 to index
         offset = vidx_i * 64
         plm.load(x, [offset, 0], [64, 128], out=tile_a)
-
         plm.load(y, [offset, 0], [64, 128], out=tile_b)
-
+        # Sync: wait for load (MTE2) to complete before compute (V)
+        pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+        pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
         plm.add(tile_a, tile_b, out=tile_c)
-
+        # Sync: wait for compute (V) to complete before store (MTE3)
+        pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
+        pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
         plm.store(tile_c, [offset, 0], [64, 128], z)
     return z
 
@@ -67,7 +70,7 @@ def test_add():
     y = torch.rand(shape, device=device, dtype=dtype)
     z = torch.empty(shape, device=device, dtype=dtype)
 
-    compiled_lib = fe.compile(add_kernel_128)
+    compiled_lib = fe.compile(add_kernel_128, arch="dav-c220-vec")
     print("compiled lib path:", compiled_lib.lib_path)
     fe.launch(None, 2, compiled_lib, x, y, z)
 

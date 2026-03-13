@@ -324,31 +324,48 @@ def _get_mlir_code(result):
     return result if isinstance(result, str) else "".join(result.values())
 
 
-def compile(prog, clean_up=False, timeout=20):
+def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
+    """Compile a PTO program to a shared library.
+    
+    Args:
+        prog: The PTO program to compile.
+        clean_up: Whether to remove intermediate files after compilation.
+        timeout: Compilation timeout in seconds.
+        arch: Target architecture. Options:
+            - "dav-c220-vec": Vector operations only (add, mul, etc.)
+            - "dav-c220-cube": Cube operations only (matmul, etc.)
+            - "dav-c220": A2A3 - Mixed vector and cube operations (default)
+            - "dav-c310": A5 - Mixed vector and cube operations (default)
+    """
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
     Path("./build").mkdir(parents=True, exist_ok=True)
     ir_path = "./build/kernel.pto"  # TODO: use Python `tempfile` module
     raw_cpp_path = "./build/kernel.cpp"
     final_kernel = "./build/call_kernel.cpp"
-    lib_path = "./build/calll_kernel.so"
-
+    lib_path = "./build/call_kernel.so"
+    os.environ["npu_arch"] = arch
     # step 1, Program -> PtoAs-mlir
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(prog))
-    # print("mlir code is:")
-    # print(mlir_code)
-    # return
+    print("===== Generated MLIR =====")
+    print(mlir_code)
+    print("==========================")
     with open(ir_path, "w") as f:
         f.write(mlir_code)
 
     # step 2, IR -> CPP
     # TODO: use `ptoas --enable-insert-sync` so no need for explicit sync in frontend
     # need https://github.com/zhangstevenunity/PTOAS/issues/10
-    subprocess.run(
-        ["ptoas", ir_path, "--enable-insert-sync", "-o", raw_cpp_path],
-        check=False, timeout=timeout, stderr=subprocess.DEVNULL
+    # Note: --pto-level=level3 is required for addr operand support
+    result = subprocess.run(
+        ["ptoas", ir_path, "--enable-insert-sync", "--pto-level=level3", "-o", raw_cpp_path],
+        check=False, timeout=timeout, capture_output=True
     )
+    if result.returncode != 0:
+        print(f"ptoas failed with return code {result.returncode}")
+        print(f"stderr: {result.stderr.decode()}")
+        return None
 
     # Step 3, preprocess cpp source
     # TODO: should extend `ptoas` emitc to largely replace this ad-doc editing
@@ -360,21 +377,44 @@ def compile(prog, clean_up=False, timeout=20):
     PTO_LIB_PATH = os.environ["ASCEND_TOOLKIT_HOME"]
     ASCEND_HOME_PATH = os.environ.get("ASCEND_HOME_PATH")
     LD_LIB_PATH = ASCEND_HOME_PATH + "/lib64/"
+    
+    # Find pto-isa include path (contains pto/pto-inst.hpp)
+    PTO_ISA_INCLUDE = os.environ.get("PTO_ISA_INCLUDE", "")
+    if not PTO_ISA_INCLUDE:
+        # Try common locations
+        possible_paths = [
+            os.path.expanduser("~/PTO-IR/pto-isa/include"),
+            os.path.expanduser("~/pto-isa/include"),
+            "/usr/local/include",
+        ]
+        for p in possible_paths:
+            if os.path.exists(os.path.join(p, "pto", "pto-inst.hpp")):
+                PTO_ISA_INCLUDE = p
+                break
+    
     flags = [
         "-fPIC",
         "-shared",
         "-xcce",
-        "--npu-arch=dav-2201",
-        "-DMEMORY_BASE",  # here hardcoded for A2A3; TODO: expose this option to jit interface
+        f"--cce-aicore-arch={arch}",
+        "-DMEMORY_BASE",
         "-O2",
         "-std=c++17",
         f"-I{PTO_LIB_PATH}/include",
     ]
+    
+    if PTO_ISA_INCLUDE:
+        flags.append(f"-I{PTO_ISA_INCLUDE}")
 
-    subprocess.run(
+    result = subprocess.run(
         ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
-        check=False, timeout=timeout
+        check=False, timeout=timeout, capture_output=True
     )
+    if result.returncode != 0:
+        print(f"bisheng compilation failed with return code {result.returncode}")
+        print(f"stdout: {result.stdout.decode()}")
+        print(f"stderr: {result.stderr.decode()}")
+        return None
 
     if clean_up:
         os.remove(ir_path)
