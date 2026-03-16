@@ -363,9 +363,61 @@ def _get_mlir_code(result):
     return result if isinstance(result, str) else "".join(result.values())
 
 
+def _normalize_arch(arch: str | None) -> str:
+    """Normalize and validate arch names."""
+    value = (arch or os.environ.get("PYPTO_JIT_ARCH") or "dav-c220").strip().lower()
+    if value not in {"dav-c220-vec", "dav-c220-cube", "dav-c220"}:
+        raise ValueError(f"Unsupported arch: {arch}")
+    return value
+
+
+def _build_bisheng_compile_flags(toolkit_home: str, arch: str) -> list[str]:
+    """Build bisheng compile flags for the mixed two-step compile path."""
+    arch = _normalize_arch(arch)
+    common = [
+        "-fPIC",
+        "-xcce",
+        "-DMEMORY_BASE",
+        "-O2",
+        "-std=c++17",
+        f"-I{toolkit_home}/include",
+    ]
+    if arch != "dav-c220":
+        raise ValueError(f"_build_bisheng_compile_flags only supports mix arch, got {arch}")
+    return ["--cce-aicore-arch=dav-c220", *common]
+
+
+def _build_bisheng_link_flags(arch: str) -> list[str]:
+    """Build bisheng link flags for shared-library output."""
+    arch = _normalize_arch(arch)
+    flags = ["-fPIC", "-shared"]
+    if arch == "dav-c220":
+        flags.append("--cce-fatobj-link")
+    return flags
+
+
+def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
+    """Build bisheng flags for the original single-command compile path."""
+    arch = _normalize_arch(arch)
+    common = [
+        "-fPIC",
+        "-shared",
+        "-xcce",
+        "-DMEMORY_BASE",
+        "-O2",
+        "-std=c++17",
+        f"-I{toolkit_home}/include",
+    ]
+    if arch == "dav-c220-vec":
+        return ["--cce-aicore-arch=dav-c220-vec", *common]
+    if arch == "dav-c220-cube":
+        return ["--cce-aicore-arch=dav-c220-cube", *common]
+    raise ValueError(f"_build_bisheng_flags only supports vec/cube arch, got {arch}")
+
+
 def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     """Compile a PTO program to a shared library.
-    
+
     Args:
         prog: The PTO program to compile.
         clean_up: Whether to remove intermediate files after compilation.
@@ -381,6 +433,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     ir_path = "./build/kernel.pto"  # TODO: use Python `tempfile` module
     raw_cpp_path = "./build/kernel.cpp"
     final_kernel = "./build/call_kernel.cpp"
+    obj_path = "./build/call_kernel.o"
     lib_path = "./build/call_kernel.so"
 
     # step 1, Program -> PtoAs-mlir
@@ -411,12 +464,19 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     # Step 4, cpp -> so
     PTO_LIB_PATH = os.environ["ASCEND_TOOLKIT_HOME"]
     ASCEND_HOME_PATH = os.environ.get("ASCEND_HOME_PATH")
+    if not ASCEND_HOME_PATH:
+        raise RuntimeError("ASCEND_HOME_PATH is not set")
     LD_LIB_PATH = ASCEND_HOME_PATH + "/lib64/"
-    
-    # Find pto-isa include path (contains pto/pto-inst.hpp)
+    runtime_includes = [
+        f"-I{ASCEND_HOME_PATH}/include",
+        f"-I{ASCEND_HOME_PATH}/pkg_inc/runtime",
+        f"-I{ASCEND_HOME_PATH}/include/experiment/runtime",
+        f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
+    ]
+    arch = _normalize_arch(arch)
+
     PTO_ISA_INCLUDE = os.environ.get("PTO_ISA_INCLUDE", "")
     if not PTO_ISA_INCLUDE:
-        # Try common locations
         possible_paths = [
             os.path.expanduser("~/PTO-IR/pto-isa/include"),
             os.path.expanduser("~/pto-isa/include"),
@@ -426,35 +486,57 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
             if os.path.exists(os.path.join(p, "pto", "pto-inst.hpp")):
                 PTO_ISA_INCLUDE = p
                 break
-    
-    flags = [
-        "-fPIC",
-        "-shared",
-        "-xcce",
-        f"--cce-aicore-arch={arch}",
-        "-DMEMORY_BASE",
-        "-O2",
-        "-std=c++17",
-        f"-I{PTO_LIB_PATH}/include",
-    ]
-    
-    if PTO_ISA_INCLUDE:
-        flags.append(f"-I{PTO_ISA_INCLUDE}")
 
-    result = subprocess.run(
-        ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
-        check=False, timeout=timeout, capture_output=True
-    )
-    if result.returncode != 0:
-        print(f"bisheng compilation failed with return code {result.returncode}")
-        print(f"stdout: {result.stdout.decode()}")
-        print(f"stderr: {result.stderr.decode()}")
-        return None
+    if arch == "dav-c220":
+        compile_flags = _build_bisheng_compile_flags(PTO_LIB_PATH, arch)
+        link_flags = _build_bisheng_link_flags(arch)
+
+        compile_flags.extend(runtime_includes)
+        if PTO_ISA_INCLUDE:
+            compile_flags.append(f"-I{PTO_ISA_INCLUDE}")
+
+        result = subprocess.run(
+            ["bisheng", *compile_flags, "-c", final_kernel, "-o", obj_path],
+            check=False, timeout=timeout, capture_output=True
+        )
+        if result.returncode != 0:
+            print(f"bisheng compile step failed with return code {result.returncode}")
+            print(f"stdout: {result.stdout.decode()}")
+            print(f"stderr: {result.stderr.decode()}")
+            return None
+
+        result = subprocess.run(
+            ["bisheng", *link_flags, obj_path, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
+            check=False, timeout=timeout, capture_output=True
+        )
+        if result.returncode != 0:
+            print(f"bisheng link step failed with return code {result.returncode}")
+            print(f"stdout: {result.stdout.decode()}")
+            print(f"stderr: {result.stderr.decode()}")
+            return None
+    else:
+        flags = _build_bisheng_flags(PTO_LIB_PATH, arch)
+
+        flags.extend(runtime_includes)
+        if PTO_ISA_INCLUDE:
+            flags.append(f"-I{PTO_ISA_INCLUDE}")
+
+        result = subprocess.run(
+            ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
+            check=False, timeout=timeout, capture_output=True
+        )
+        if result.returncode != 0:
+            print(f"bisheng compilation failed with return code {result.returncode}")
+            print(f"stdout: {result.stdout.decode()}")
+            print(f"stderr: {result.stderr.decode()}")
+            return None
 
     if clean_up:
         os.remove(ir_path)
         os.remove(raw_cpp_path)
         os.remove(final_kernel)
+        if arch == "dav-c220" and Path(obj_path).exists():
+            os.remove(obj_path)
 
     return CompiledKernel(lib_path=lib_path, param_specs=_extract_param_specs(prog))
 
@@ -550,3 +632,5 @@ def jit(target=None, optimize: bool = True, cache: bool = True,
         return decorator(target)
     else:
         return decorator
+
+
