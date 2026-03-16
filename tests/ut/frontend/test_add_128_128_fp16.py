@@ -57,7 +57,7 @@ def add_kernel_128(
 
 @fe.jit()
 def test_add():
-    device = "npu"
+    device = "npu:1"
     torch.npu.set_device(device)
 
     shape = [128, 128]  # tensor shape hard-coded as the kernel
@@ -67,7 +67,7 @@ def test_add():
     y = torch.rand(shape, device=device, dtype=dtype)
     z = torch.empty(shape, device=device, dtype=dtype)
 
-    compiled_lib = fe.compile(add_kernel_128)
+    compiled_lib = fe.compile(add_kernel_128, arch="dav-c220-vec")
     print("compiled lib path:", compiled_lib.lib_path)
     fe.launch(None, 2, compiled_lib, x, y, z)
 

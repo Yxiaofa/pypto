@@ -533,7 +533,7 @@ void PTOCodegen::SetCurrentResultBuf(const std::string& buf) { current_result_bu
 
 void PTOCodegen::EmitExtraAllocTiles() {
   for (const auto& [name, type_str] : extra_alloc_tiles_) {
-    stream_ << GetIndent() << name << " = pto.alloc_tile addr = " << GetOrEmitI64Constant(0) << " : " << type_str << "\n";
+    stream_ << GetIndent() << name << " = pto.alloc_tile : " << type_str << "\n";
   }
 }
 

@@ -443,31 +443,18 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     if not ASCEND_HOME_PATH:
         raise RuntimeError("ASCEND_HOME_PATH is not set")
     LD_LIB_PATH = ASCEND_HOME_PATH + "/lib64/"
-    runtime_includes = [
-        f"-I{ASCEND_HOME_PATH}/include",
-        f"-I{ASCEND_HOME_PATH}/pkg_inc/runtime",
-        f"-I{ASCEND_HOME_PATH}/include/experiment/runtime",
-        f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
+    
+    flags = [
+        "-fPIC",
+        "-shared",
+        "-xcce",
+        f"--cce-aicore-arch={arch}",
+        "-DMEMORY_BASE",
+        "-O2",
+        "-std=c++17",
+        f"-I{PTO_LIB_PATH}/include",
     ]
-    arch = _normalize_arch(arch)
-
-    PTO_ISA_INCLUDE = os.environ.get("PTO_ISA_INCLUDE", "")
-    if not PTO_ISA_INCLUDE:
-        possible_paths = [
-            os.path.expanduser("~/PTO-IR/pto-isa/include"),
-            os.path.expanduser("~/pto-isa/include"),
-            "/usr/local/include",
-        ]
-        for p in possible_paths:
-            if os.path.exists(os.path.join(p, "pto", "pto-inst.hpp")):
-                PTO_ISA_INCLUDE = p
-                break
-
-    flags = _build_bisheng_flags(PTO_LIB_PATH, arch)
-    flags.extend(runtime_includes)
-    if PTO_ISA_INCLUDE:
-        flags.append(f"-I{PTO_ISA_INCLUDE}")
-
+    
     result = subprocess.run(
         ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
         check=False, timeout=timeout, capture_output=True
