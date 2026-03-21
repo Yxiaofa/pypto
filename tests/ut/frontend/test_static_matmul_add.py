@@ -109,9 +109,9 @@ def static_matmul_add_kernel(
         pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
         pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
         plm.l0c_store(tile_c, [0, 0], [64, 64], matmul_out)
-
+        pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=3)
     with pl.section_vector():
-        pl.system.bar_all()
+        pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=3)
         pl.system.sync_src(set_pipe=pl.PipeType.MTE3, wait_pipe=pl.PipeType.MTE2, event_id=0)
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE3, wait_pipe=pl.PipeType.MTE2, event_id=0)
 

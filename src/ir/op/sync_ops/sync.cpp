@@ -101,5 +101,16 @@ REGISTER_OP("system.wait_cross_core")
     .set_attr<int>("event_id")
     .f_deduce_type(DeduceUnknownType);
 
+// Register system.sync_all (Global Core Synchronization)
+// Attributes: set_pipe, wait_pipe
+REGISTER_OP("system.sync_all")
+    .set_description("Global core synchronization")
+    .set_op_category("SyncOp")
+    .no_argument()
+    .set_attr<bool>("aiv_only")
+    .set_attr<int>("trigger_pipe")
+    .set_attr<int>("wait_pipe")
+    .f_deduce_type(DeduceUnknownType);
+
 }  // namespace ir
 }  // namespace pypto

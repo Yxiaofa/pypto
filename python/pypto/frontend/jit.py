@@ -490,7 +490,7 @@ def _build_bisheng_flags(toolkit_home: str, arch: str) -> list[str]:
     raise ValueError(f"Unsupported arch for _build_bisheng_flags: {arch}")
 
 
-def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_sync = False):
+def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220"):
     """Compile a PTO program to a shared library.
 
     Args:
@@ -520,6 +520,9 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "dav-c220", has_cross_
     # step 1, Program -> PtoAs-mlir
     codegen = PTOCodegen()
     mlir_code = _get_mlir_code(codegen.generate(prog))
+    has_cross_sync = False
+    if "pto.sync.set" in mlir_code and "pto.sync.wait" in mlir_code:
+        has_cross_sync = True
     if has_cross_sync :
         mlir_code = _inject_set_ffts_to_mlir(mlir_code)
     with open(ir_path, "w") as f:
