@@ -248,7 +248,6 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
   std::string tile_buf    = codegen.GetVarName(out_tile);
 
   std::string tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-
   // Derive tile_buf type from the out_tile's TileType memref (may be empty before alloc pass).
   std::string tile_buf_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
 

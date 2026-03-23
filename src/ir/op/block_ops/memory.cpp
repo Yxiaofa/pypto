@@ -185,41 +185,9 @@ TypePtr DeduceBlockMoveType(const std::vector<ExprPtr>& args,
   CHECK(tile_type) << "The operator " << op_name << " requires first argument to be a TileType, but got "
                    << args[0]->GetType()->TypeName();
 
-  // Extract transpose attribute (default: false)
-  bool transpose = GetKwarg<bool>(kwargs, "transpose", false);
-
-  // Extract MemorySpace
-  MemorySpace space = GetKwarg<MemorySpace>(kwargs, "target_memory");
-
-  // Determine output shape based on transpose flag
-  const auto& input_shape = tile_type->shape_;
-  std::vector<ExprPtr> output_shape;
-
-  TileView tile_view;
-  if (space == MemorySpace::Left) {
-    tile_view.blayout = TileLayout::col_major;  // L0A requires ColMajor block layout for TMATMUL
-    tile_view.slayout = TileLayout::row_major;
-  } else if (space == MemorySpace::Right) {
-    tile_view.slayout = TileLayout::col_major;
-  }
-
-  if (transpose && input_shape.size() == 2) {
-    // Transpose: swap dimensions [H, W] -> [W, H]
-    output_shape = {input_shape[1], input_shape[0]};
-    // Fix: layout should be determined by src layout?
-    if (tile_view.slayout != TileLayout::none_box) {
-      std::swap(tile_view.blayout, tile_view.slayout);
-    } else {
-      tile_view.blayout =
-          tile_view.blayout == TileLayout::row_major ? TileLayout::col_major : TileLayout::row_major;
-    }
-  } else {
-    // No transpose: keep original shape
-    output_shape = input_shape;
-  }
-
-  // Return TileType with computed shape and same dtype (no explicit MemRef)
-  return std::make_shared<TileType>(output_shape, tile_type->dtype_, std::nullopt, tile_view);
+  // Return TileType with same shape and dtype (no explicit MemRef).
+  // The actual TMOV variant is determined by the output tile's memory space at codegen time.
+  return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_);
 }
 
 TypePtr DeduceBlockUbCopyType(const std::vector<ExprPtr>& args,
@@ -478,10 +446,8 @@ REGISTER_OP("block.l0c_store")
 
 REGISTER_OP("block.move")
     .set_op_category("BlockOp")
-    .set_description("Move tile to memory levels (Vec/Mat/Left/Right) with optional transpose")
+    .set_description("Move tile between memory levels. TMOV variant determined by output tile's memory space.")
     .add_argument("tile", "Input tile (TileType)")
-    .set_attr<bool>("transpose")
-    .set_attr<MemorySpace>("target_memory")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceBlockMoveType(args, kwargs, "block.move");

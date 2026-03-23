@@ -100,6 +100,7 @@ def load_tile(
         tile_offsets: MakeTuple of tile-relative offsets.
         valid_shapes: MakeTuple of tile shapes (used for offset computation only).
         span: Optional source span.
+        layout: Tensor memory layout, "ND" (row-major) or "DN" (column-major).
 
     Returns:
         Call expression for manual.load with absolute offsets and empty shapes.
@@ -117,9 +118,9 @@ def load_tile(
     valid_shapes_tuple = (
         _ir_core.MakeTuple([], actual_span) if valid_shapes is None else _to_make_tuple(valid_shapes, actual_span)
     )
-
+    kwargs = {}
     return _ir_core.create_op_call(
-        "manual.load", [tensor, offsets_tuple, valid_shapes_tuple, out], {}, actual_span
+        "manual.load", [tensor, offsets_tuple, valid_shapes_tuple, out], kwargs, actual_span
     )
 
 

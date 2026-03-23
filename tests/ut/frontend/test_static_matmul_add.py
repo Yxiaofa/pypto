@@ -98,8 +98,8 @@ def static_matmul_add_kernel(
         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
-        plm.move(tile_a, tile_a_load, target_memory=pl.MemorySpace.Left)
-        plm.move(tile_b, tile_b_load, target_memory=pl.MemorySpace.Right)
+        plm.move(tile_a, tile_a_load)
+        plm.move(tile_b, tile_b_load)
 
         pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)
         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.M, event_id=0)

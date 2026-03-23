@@ -104,11 +104,10 @@ REGISTER_OP("manual.store")
 REGISTER_OP("manual.move")
     .set_op_category("ManualOp")
     .set_description(
-        "Manual move: transfer a tile between memory levels into a pre-allocated buffer.")
+        "Manual move: transfer a tile between memory levels into a pre-allocated buffer. "
+        "The TMOV variant is determined by the output tile's memory space.")
     .add_argument("src", "Source tile (TileType)")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
-    .set_attr<MemorySpace>("target_memory")
-    .set_attr<bool>("transpose")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceManualOutTileType(args, kwargs, "manual.move", 2);
