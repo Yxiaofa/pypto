@@ -28,7 +28,9 @@ SOFTMAX_SCALE = 0.08838834764831845  # 1.0 / sqrt(128)
 TEST_S0 = 2048
 TEST_S1 = 1024
 TEST_BLOCK_DIM = 8
-
+FA_QK_READY = 7
+FA_P_READY = 8
+FA_PV_READY = 9
 
 @fe.kernel
 def flash_attention_kernel(
@@ -264,7 +266,7 @@ def flash_attention_kernel(
                 pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
                 pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
                 plm.store_tile(qk_buf, qk_acc, [s0_tile, s1_tile])
-                pl.system.bar_all()
+                pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=FA_QK_READY)
 
     # ---------------- Stage 2: Vector1 computes softmax ---------------- #
     # First pass over S1 computes online mi/li and writes stage p_buf.
@@ -284,6 +286,7 @@ def flash_attention_kernel(
         num_tiles_s1 = s1 // TILE_S1
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
+            pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_QK_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
             for s1_tile in pl.range(num_tiles_s1):
                 pl.system.bar_all()
@@ -343,6 +346,7 @@ def flash_attention_kernel(
             plm.store_tile(mi_out, mi_local, [s0_vec_tile, 0])
             plm.row_max(mi_local, li_running, tmp_vec)
             plm.store_tile(li_out, mi_local, [s0_vec_tile, 0])
+            pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=FA_P_READY)
 
     # ---------------- Stage 3: Cube2 computes PV ---------------- #
     with pl.section_cube():
@@ -358,6 +362,7 @@ def flash_attention_kernel(
         num_tiles_s1 = s1 // TILE_S1
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
+            pl.system.wait_cross_core(pipe=pl.PipeType.MTE3, event_id=FA_P_READY)
             for s1_tile in pl.range(num_tiles_s1):
                 plm.load_tile(p_mat, p_norm_buf, [s0_tile, s1_tile])
                 plm.load_tile(v_mat, v, [s1_tile, 0])
@@ -382,7 +387,7 @@ def flash_attention_kernel(
             pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
             pl.system.sync_dst(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.FIX, event_id=0)
             plm.store_tile(pv_buf, pv_acc, [s0_tile, 0])
-            pl.system.bar_all()
+            pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=FA_PV_READY)
 
     # ---------------- Stage 4: Vector2 writes final O ---------------- #
     with pl.section_vector():
@@ -397,6 +402,7 @@ def flash_attention_kernel(
         num_tiles_s0 = s0 // TILE_S0
 
         for s0_tile in pl.range(block_idx, num_tiles_s0, block_num):
+            pl.system.wait_cross_core(pipe=pl.PipeType.FIX, event_id=FA_PV_READY)
             s0_vec_tile = s0_tile * 2 + subblock_idx
             pl.system.bar_all()
             plm.load_tile(qk_vec, pv_buf, [s0_vec_tile, 0])

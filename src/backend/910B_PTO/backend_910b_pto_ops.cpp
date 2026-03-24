@@ -44,6 +44,15 @@ const std::vector<std::string> cmp_modes = {"eq", "ne", "lt", "le", "gt", "ge"};
 const std::vector<std::string> round_modes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                               "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
 
+// CVSyncEvent
+enum CVSyncEvent : uint16_t {
+    SYNC_AIC_FLAG = 11,
+    SYNC_AIV_FLAG = 12,
+    SYNC_AIC_AIV_FLAG = 13,
+    SYNC_AIV_ONLY_ALL = 14,
+    SYNC_FLAG_ID_MAX = 16,
+};
+
 // Helper function for input & output generation (with type annotations)
 static std::string GenerateInsOutsClause(const CallPtr& op, codegen::PTOCodegen& codegen,
                                          const std::string& config_attr = "") {
@@ -903,6 +912,94 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.wait_cross_core")
     .set_pipe(ir::PipeType::S)
     .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
       return MakeWaitCrossCoreCodegenPTO(op, codegen);
+    });
+
+static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
+  auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
+  CHECK(op->args_.empty()) << "system.sync_all takes no arguments, but got " << op->args_.size();
+  const char* arch = std::getenv("npu_arch");
+  std::string arch_val(arch);
+  bool aiv_only = false;
+  int trigger_pipe_val = 0, wait_pipe_val = 0;
+  for (const auto& [key, value] : op->kwargs_) {
+    if (key == "aiv_only") {
+      aiv_only = std::any_cast<bool>(value);
+    } else if (key == "trigger_pipe") {
+      trigger_pipe_val = std::any_cast<int>(value);
+    } else if (key == "wait_pipe") {
+      wait_pipe_val = std::any_cast<int>(value);
+    }
+  }
+  std::ostringstream oss;
+  if (arch_val == "dav-c220") {
+    codegen.Emit("pto.barrier #pto.pipe<PIPE_ALL>");
+    if (aiv_only) {
+      oss << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL << "\n      "
+          << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL;
+      codegen.Emit(oss.str());
+      return "";
+    }
+    // AIC
+    oss << "pto.section.cube {" << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_FLAG << "\n      "
+        // << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
+        // << "pto.sync.wait #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n    }";
+    codegen.Emit(oss.str());
+    // AIV
+    oss.str("");
+    oss << "pto.section.vector {" << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_FLAG << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n    }";
+    codegen.Emit(oss.str());
+  } else if (arch_val == "dav-c310") {
+    if (aiv_only) {
+      codegen.Emit("pto.section.vector {");
+      std::string trigger_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(trigger_pipe_val));
+      codegen.Emit(" pto.barrier #pto.pipe<PIPE_" + trigger_pipe_str + ">");
+      if (trigger_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+        oss << " pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL;
+        codegen.Emit(oss.str());
+      } else {
+        oss << " pto.sync.set #pto.pipe<PIPE_" << trigger_pipe_str << ">, " << SYNC_AIV_ONLY_ALL;
+        codegen.Emit(oss.str());
+      }
+      if (wait_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
+        oss.str("");
+        oss << " pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIV_ONLY_ALL;
+        codegen.Emit(oss.str());
+      } else {
+        oss.str("");
+        std::string wait_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(wait_pipe_val));
+        oss << " pto.sync.wait #pto.pipe<PIPE_" << wait_pipe_str << ">, " << SYNC_AIV_ONLY_ALL;
+        codegen.Emit(oss.str());
+      }
+      codegen.Emit("}");
+      return "";
+    }
+    codegen.Emit("pto.barrier #pto.pipe<PIPE_ALL>");
+    // AIC
+    oss << "pto.section.cube {" << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIV_FLAG << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << (SYNC_AIV_FLAG + SYNC_FLAG_ID_MAX) << "\n      "
+        // << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
+        // << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIC_FLAG << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << (SYNC_AIC_AIV_FLAG + SYNC_FLAG_ID_MAX) << "\n    }";
+    codegen.Emit(oss.str());
+    // AIV
+    oss.str("");
+    oss << "pto.section.vector {" << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_FLAG << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIC_AIV_FLAG << "\n    }";
+    codegen.Emit(oss.str());
+  }
+  return "";
+}
+REGISTER_BACKEND_OP(Backend910B_PTO, "system.sync_all")
+    .set_pipe(ir::PipeType::S)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen) {
+      return MakeSystemSyncAllCodegenPTO(op, codegen);
     });
 }  // namespace backend
 }  // namespace pypto
