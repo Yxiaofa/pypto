@@ -5,36 +5,73 @@
 
 ## Current Status: PASSING
 
-Both `fa_kt_kernel` and `fa_k_kernel` pass precision checks.
+`fa_k_kernel` passes multi-core precision checks with TD=128.
 
-| Kernel | Shapes | Max Diff | Tolerance |
-|--------|--------|----------|-----------|
-| fa_kt_kernel | (64,64,64), (64,128,64) | 0.0005 | atol=1e-2 |
-| fa_k_kernel | (64,128,64), (64,256,64), (64,512,64) | 0.02 | atol=5e-2 |
+| Kernel | Shapes | Cores | Max Diff | Tolerance |
+|--------|--------|-------|----------|-----------|
+| fa_k_kernel | (128, 256, 128) | 1 | 0.0005 | atol=1e-3 |
+| fa_k_kernel | (512, 512, 128) | 2 | 0.0005 | atol=1e-3 |
+| fa_k_kernel | (8192, 8192, 128) | 24 | ~0.001 | atol=1e-3 |
 
-fa_k_kernel has slightly worse precision due to the in-kernel transpose (`plm.move(..., transpose=True)`).
+## Root Causes Fixed (This Session)
 
-## Root Causes Fixed
+### 1. Missing pipe_barrier(PIPE_V) — THE MAIN BUG
 
-### 1. Missing Tile Layout Parameters (CRITICAL)
+On Ascend a2/a3, the vector pipeline does NOT enforce data dependencies between TVEC instructions. Without `pl.system.bar_v()` between dependent ops, later ops read **stale data** from the vector unit → silently wrong softmax correction → output matched "no correction" baseline exactly.
 
-Cube matmul tiles MUST specify `blayout` and `slayout` matching the hardware NZ format. Without these, data is loaded/stored in wrong format → completely wrong matmul results.
+**Symptom**: Single-tile test PASSED (no correction needed), multi-tile test FAILED with large error (0.79). Debug showed output exactly matched `(PV_0 + PV_1) / (sum0 + sum1)` without the online softmax correction factor.
 
-**Required layouts for Cube matmul:**
+**Fix**: Add `pl.system.bar_v()` after every TVEC op whose output is consumed by the next op (RAW dependency). Pattern from reference `pto_macro_fa_softmax.hpp`:
 
-| Memory | blayout | slayout | fractal | Notes |
-|--------|---------|---------|---------|-------|
-| MAT (L1) | 2 (col_major) | 1 (row_major) | 512 | NZ format |
-| LEFT (L0A) | 1 (row_major) | 1 (row_major) | 512 | Left operand |
-| RIGHT (L0B) | 1 (row_major) | 2 (col_major) | 512 | Right operand |
-| ACC (L0C) | 2 (col_major) | 1 (row_major) | **1024** | FP32 accumulator |
-| VEC (UB) | default | default | 512 | No special layout |
+```python
+# INIT:
+plm.row_max(reduce_dst, qk_vec, tmp_vec)
+pl.system.bar_v()                          # ← TROWMAX → TROWEXPANDSUB
+plm.row_expand_sub(tmp_vec, qk_vec, reduce_dst)
+plm.muls(global_max, reduce_dst, 1.0)     # independent copy, no barrier needed
+plm.muls(tmp_vec, tmp_vec, SCALE)
+plm.exp(qk_vec, tmp_vec)
+pl.system.bar_v()                          # ← TEXP → TROWSUM
+plm.row_sum(reduce_dst, qk_vec, tmp_vec)
+pl.system.bar_v()                          # ← TROWSUM → TMULS(copy)
+plm.muls(global_sum, reduce_dst, 1.0)
 
-**Reference**: `tests/ut/frontend/test_dynamic_matmul.py` uses correct layouts.
+# UPDATE (6 barriers):
+plm.row_max(...)
+pl.system.bar_v()      # → TMAX
+plm.maximum(...)
+pl.system.bar_v()      # → TSUB
+plm.sub(...)
+pl.system.bar_v()      # → TMULS(copy)
+plm.muls(global_max_rm, reduce_dst_rm, 1.0)
+pl.system.bar_v()      # → TROWEXPANDSUB
+# interleaved independent ops (no barrier)...
+plm.exp(exp_corr_rm, ...) ; plm.exp(qk_vec, ...) ; plm.cast(...)
+pl.system.bar_v()      # → TMUL, TROWSUM
+plm.mul(...) ; plm.row_sum(...)
+pl.system.bar_v()      # → TADD
+plm.add(...)
+```
 
-### 2. Missing wait_cross_core in fa_kt_kernel
+**Key insight**: Independent ops on different tiles can run without barriers. E.g., `TMULS` on [1,64] exp_corr and `TMULS` on [64,128] tmp_vec operate on different data → no barrier needed between them.
 
-`wait_cross_core(M, P_READY)` was commented out. Cube read uninitialized `p_buf` → `pv_buf = 0` → `o = 0`.
+### 2. Wrong pv_buf Multi-Core Offset (core_id * 24)
+
+**Bug**: `plm.l0c_store(acc, [core_id * 24 + q_mat_idx * TS, 0], ...)` — the `24` was wrong. Each core needs `2 * TS = 256` rows in pv_buf (double-buffered Q tile slots).
+
+**Fix**: `PV_CORE_STRIDE = 2 * TS` → `core_id * PV_CORE_STRIDE + q_mat_idx * TS`
+
+### 3. Vector core_id in Mix Mode (section_cube/section_vector)
+
+When using `pl.section_cube()` / `pl.section_vector()`, `get_block_idx()` returns the same core index (0..num_cores-1) in **both** sections. No `// 2` needed. `get_subblock_idx()` differentiates the two vector sub-blocks (0 or 1).
+
+## Historical Fixes (Previous Sessions)
+
+### Tile Layout Parameters (CRITICAL)
+Cube matmul tiles auto-fill correct `blayout`/`slayout` via `TileType` Python wrapper (see `manual_ops.py` `_REQUIRED_LAYOUTS`). No need to specify manually unless overriding (e.g., K DN-layout load uses `blayout=1, slayout=2`).
+
+### Missing wait_cross_core
+`wait_cross_core(M, P_READY)` is mandatory in Cube section before loading P written by Vector.
 
 ## PLM Parser Convention (CRITICAL)
 
@@ -45,7 +82,6 @@ plm.sub(OUT, lhs, rhs)     # → manual.sub(lhs, rhs, OUT)
 plm.muls(OUT, tile, scalar) # → manual.muls(tile, scalar, OUT)
 plm.matmul(OUT, left, right) # → manual.matmul(left, right, OUT)
 plm.row_max(OUT, tile, tmp)  # → manual.row_max(tile, tmp, OUT)
-plm.row_expand(OUT, src)     # → manual.row_expand(src, OUT)
 plm.cast(OUT, tile, target_type=pl.FP16, mode="round")
 ```
 
@@ -53,62 +89,13 @@ plm.cast(OUT, tile, target_type=pl.FP16, mode="round")
 - `plm.make_tile(tile_type, addr=X, size=Y)` → `block.make_tile(...)`
 - `plm.l0c_store(tile, offsets, shapes, tensor)` → `block.l0c_store(tile, offsets, shapes, tensor)`
 
-## Sync Rules Summary
+## VEC Reduce Tile Pattern
 
-### Intra-pipe (same core)
-| Before | After | Sync |
-|--------|-------|------|
-| TLOAD (MTE2) | TMOV (MTE1) | `sync(MTE2, MTE1)` |
-| TLOAD (MTE2) | TVEC (V) | `sync(MTE2, V)` |
-| TMOV (MTE1) | TMATMUL (M) | `sync(MTE1, M)` |
-| TMATMUL (M) | TSTORE_ACC (FIX) | `sync(M, FIX)` **CRITICAL** |
-| TVEC (V) | TSTORE_VEC (MTE3) | `sync(V, MTE3)` |
-
-### Cross-core (Cube ↔ Vector)
+Element-wise TVEC ops (TMAX, TSUB, TEXP, TMUL, TADD) require **RowMajor** blayout. Row-reduce/expand ops (TROWMAX, TROWSUM, TROWEXPAND*) use **ColMajor** [64,1]. Solution: alias same address:
 ```python
-# Cube signals Vector:
-pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=N)
-# Vector waits:
-pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=N)
-
-# Vector signals Cube:
-pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=N)
-# Cube waits:
-pl.system.wait_cross_core(pipe=pl.PipeType.M, event_id=N)
+reduce_dst    = plm.make_tile(..., shape=[64, 1], blayout=2, addr=ADDR)  # ColMajor
+reduce_dst_rm = plm.make_tile(..., shape=[1, 64], addr=ADDR)             # RowMajor alias
 ```
-
-## Kernel Architecture
-
-### FA Algorithm (single-core, Cube+Vector streaming)
-```
-For each KV tile j:
-  [Cube]   S_j = Q @ K_j^T              # QK matmul
-  [Cube]   l0c_store S_j → qk_buf       # ACC → GM
-  [Cube]   set_cross_core(FIX, QK_READY) # signal Vector
-  [Cube]   wait_cross_core(M, P_READY)   # MUST wait for P
-  [Vector] wait_cross_core(V, QK_READY)  # wait for QK
-  [Vector] load qk_buf → qk_vec         # GM → VEC
-  [Vector] FlashSoftmax(qk_vec) → p_f16  # online softmax
-  [Vector] store p_f16 → p_buf           # VEC → GM
-  [Vector] set_cross_core(MTE3, P_READY) # signal Cube
-  [Cube]   P_j @ V_j → pv_acc           # PV matmul
-  [Cube]   l0c_store pv_acc → pv_buf    # ACC → GM
-  [Cube]   set_cross_core(FIX, PV_READY) # signal Vector
-  [Vector] wait_cross_core(V, PV_READY)  # wait for PV
-  [Vector] GlobalUpdate: O += PV_j       # running accumulation
-[Vector] O /= global_sum                  # final normalization
-```
-
-### Memory Layout
-- **Cube MAT**: 4 tiles × 8KB = 32KB (q_mat, k_mat, p_mat, v_mat)
-- **Cube LEFT**: 2 tiles × 8KB = 16KB (q_left@0, p_left@8K)
-- **Cube RIGHT**: 2 tiles × 8KB = 16KB (k_right@0, v_right@8K)
-- **Cube ACC**: 2 tiles × 16KB = 32KB (qk_acc@0, pv_acc@16K)
-- **Vector VEC**: 8 tiles, total 60KB (within 192KB limit)
-
-### Two Versions
-1. **fa_kt_kernel**: K^T pre-transposed `kt: [D, Skv]` — best precision (max diff 0.0005)
-2. **fa_k_kernel**: K not transposed `k: [Skv, D]` — uses `plm.move(..., transpose=True)`, slightly worse precision (max diff ~0.02)
 
 ## Compilation Flow
 ```bash
