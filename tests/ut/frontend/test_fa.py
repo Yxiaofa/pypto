@@ -152,7 +152,7 @@ def alloc_cube_buffer():
     return q_mat_buf, k_mat_buf, p_mat_buf, v_mat_buf, left_buf, right_buf, acc_buf
 
 
-def matmul1(ctx):
+def compute_qk(ctx):
     q_mat_idx = ctx.q_count % 2
     skv_off = ctx.skvi * TKV
 
@@ -185,7 +185,7 @@ def matmul1(ctx):
     return
 
 
-def matmul2(ctx):
+def compute_pv(ctx):
     q_mat_idx = ctx.q_count % 2
     sv_off = ctx.skvi * TKV
     pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=event_ids_23[ctx.buf_idx])
@@ -256,10 +256,10 @@ def fa_k_kernel(
                 ctx.sq_off = qi * TS
                 ctx.skvi = skvi
                 ctx.buf_idx = (ctx.q_count * skv_tiles + skvi) % 2
-                matmul1(ctx)
+                compute_qk(ctx)
 
                 # PV phase
-                matmul2(ctx)
+                compute_pv(ctx)
 
             ctx.q_count = ctx.q_count + 1
         

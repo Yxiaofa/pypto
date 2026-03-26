@@ -1131,25 +1131,46 @@ REGISTER_BACKEND_OP(Backend910B_PTO, "system.wait_cross_core")
     });
 
 // Dynamic event_id variants (cross-core)
+// PTOAS's pto.sync.set/wait only accept static I32Attr event_id.
+// Lower dynamic event_id to an scf.if chain of static ops:
+//   %cond0 = arith.cmpi eq, %eid, %c0 : index
+//   scf.if %cond0 { pto.sync.set #pto.pipe<PIPE_X>, 0 }
+//   %cond1 = arith.cmpi eq, %eid, %c1 : index
+//   scf.if %cond1 { pto.sync.set #pto.pipe<PIPE_X>, 1 }
+//   ...
+static constexpr int kMaxCrossCoreEventId = 16;
+
 static std::string MakeSetCrossCoreDynCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto pipe = op->GetKwarg<int>("pipe");
+  std::string pipe_name = GetPipeTypeName(static_cast<ir::PipeType>(pipe));
   std::string event_id = codegen.GetExprAsCode(op->args_[0]);
-  std::ostringstream oss;
-  oss << "pto.sync.set <PIPE_" << GetPipeTypeName(static_cast<ir::PipeType>(pipe))
-      << ">, " << event_id;
-  codegen.Emit(oss.str());
+
+  for (int i = 0; i < kMaxCrossCoreEventId; ++i) {
+    std::string ci = codegen.GetIndexConstant(static_cast<int64_t>(i));
+    std::string cond = codegen.NewTemp();
+    codegen.Emit(cond + " = arith.cmpi eq, " + event_id + ", " + ci + " : index");
+    codegen.Emit("scf.if " + cond + " {");
+    codegen.Emit("  pto.sync.set #pto.pipe<PIPE_" + pipe_name + ">, " + std::to_string(i));
+    codegen.Emit("}");
+  }
   return "";
 }
 
 static std::string MakeWaitCrossCoreDynCodegenPTO(const CallPtr& op, codegen::CodegenBase& codegen_base) {
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto pipe = op->GetKwarg<int>("pipe");
+  std::string pipe_name = GetPipeTypeName(static_cast<ir::PipeType>(pipe));
   std::string event_id = codegen.GetExprAsCode(op->args_[0]);
-  std::ostringstream oss;
-  oss << "pto.sync.wait <PIPE_" << GetPipeTypeName(static_cast<ir::PipeType>(pipe))
-      << ">, " << event_id;
-  codegen.Emit(oss.str());
+
+  for (int i = 0; i < kMaxCrossCoreEventId; ++i) {
+    std::string ci = codegen.GetIndexConstant(static_cast<int64_t>(i));
+    std::string cond = codegen.NewTemp();
+    codegen.Emit(cond + " = arith.cmpi eq, " + event_id + ", " + ci + " : index");
+    codegen.Emit("scf.if " + cond + " {");
+    codegen.Emit("  pto.sync.wait #pto.pipe<PIPE_" + pipe_name + ">, " + std::to_string(i));
+    codegen.Emit("}");
+  }
   return "";
 }
 
