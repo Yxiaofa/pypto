@@ -62,6 +62,20 @@ class SyncTracker:
 
     # -- forward sync ------------------------------------------------------
 
+    def _make_sync_pair(self, set_pipe: PipeType, wait_pipe: PipeType, dep_type: str) -> SyncPair:
+        """Create a SyncPair with proper event_id.
+
+        V→V pairs on a2/a3 are handled by ``bar_v`` in the emission layer
+        (hardware does not support ``set_flag[V, V]``).  They do not
+        consume a hardware event register, so event_id is left at 0.
+        All other cross-pipe pairs allocate a forward event_id from the
+        per-pipe-pair pool.
+        """
+        if set_pipe == PipeType.V and wait_pipe == PipeType.V:
+            return SyncPair(set_pipe, wait_pipe, dep_type, event_id=0)
+        eid = self._event_allocator.forward_event_id(set_pipe, wait_pipe)
+        return SyncPair(set_pipe, wait_pipe, dep_type, eid)
+
     def record_op(
         self,
         pipe: PipeType,
@@ -85,48 +99,58 @@ class SyncTracker:
         emitted: dict[tuple[PipeType, PipeType], SyncPair] = {}
 
         # Helper: should we emit a sync for this (prev_pipe → current_pipe) dep?
-        def _needs_sync(prev_pipe: PipeType) -> bool:
-            if prev_pipe != pipe:
-                return True  # always sync across different pipes
-            return self._same_pipe_sync  # same pipe: only on archs that require it
+        def _needs_sync(prev_pipe: PipeType, state: BufferState) -> bool:
+            if prev_pipe == pipe:
+                # Same-pipe sync only needed for PIPE_V on a2/a3
+                if not (self._same_pipe_sync and pipe == PipeType.V):
+                    return False
+            # Already synced (hardware set_flag is per-pipe, covers all tiles)
+            if pipe in state.synced_to:
+                return False
+            return True
 
         # RAW: reading a tile last written on a (possibly same) pipe
         for name in read_tile_names:
             state = self._buffer_states.get(name)
-            if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe):
+            if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe, state):
                 key = (state.last_write_pipe, pipe)
                 if key not in emitted:
-                    eid = self._event_allocator.forward_event_id(*key)
-                    emitted[key] = SyncPair(state.last_write_pipe, pipe, "raw", eid)
+                    emitted[key] = self._make_sync_pair(*key, "raw")
 
         # WAW: writing a tile last written on a (possibly same) pipe
         for name in write_tile_names:
             state = self._buffer_states.get(name)
-            if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe):
+            if state and state.last_write_pipe is not None and _needs_sync(state.last_write_pipe, state):
                 key = (state.last_write_pipe, pipe)
                 if key not in emitted:
-                    eid = self._event_allocator.forward_event_id(*key)
-                    emitted[key] = SyncPair(state.last_write_pipe, pipe, "waw", eid)
+                    emitted[key] = self._make_sync_pair(*key, "waw")
 
         # WAR: writing a tile last read on a (possibly same) pipe
         for name in write_tile_names:
             state = self._buffer_states.get(name)
             if state:
                 for read_pipe in state.last_read_pipes:
-                    if _needs_sync(read_pipe):
+                    if read_pipe != pipe or (self._same_pipe_sync and pipe == PipeType.V):
                         key = (read_pipe, pipe)
                         if key not in emitted:
-                            eid = self._event_allocator.forward_event_id(*key)
-                            emitted[key] = SyncPair(read_pipe, pipe, "war", eid)
+                            emitted[key] = self._make_sync_pair(*key, "war")
 
         # Address-overlap: check tiles with different names but overlapping memory
         self._check_overlap_deps(pipe, read_tile_names, write_tile_names, emitted)
+
+        # Mark all tiles sharing the same set_pipe as synced to wait_pipe.
+        # Hardware set_flag is per-pipe — one sync covers all tiles on that pipe.
+        for set_pipe, wait_pipe in emitted:
+            for state in self._buffer_states.values():
+                if state.last_write_pipe == set_pipe:
+                    state.synced_to.add(wait_pipe)
 
         # Update buffer states
         for name in write_tile_names:
             state = self._buffer_states.setdefault(name, BufferState())
             state.last_write_pipe = pipe
             state.last_read_pipes.clear()
+            state.synced_to.clear()  # new write invalidates previous syncs
 
         for name in read_tile_names:
             state = self._buffer_states.setdefault(name, BufferState())
@@ -151,7 +175,9 @@ class SyncTracker:
     ) -> None:
         """Check for deps via physical address overlap."""
         def _needs_sync(prev_pipe: PipeType) -> bool:
-            return prev_pipe != pipe or self._same_pipe_sync
+            if prev_pipe == pipe:
+                return self._same_pipe_sync and pipe == PipeType.V
+            return True
 
         # RAW overlap
         for read_name in read_tile_names:
@@ -169,8 +195,7 @@ class SyncTracker:
                 if read_region.overlaps(other_region):
                     key = (other_state.last_write_pipe, pipe)
                     if key not in emitted:
-                        eid = self._event_allocator.forward_event_id(*key)
-                        emitted[key] = SyncPair(*key, "raw_overlap", eid)
+                        emitted[key] = self._make_sync_pair(*key, "raw_overlap")
 
         # WAW overlap
         for write_name in write_tile_names:
@@ -188,8 +213,7 @@ class SyncTracker:
                 if write_region.overlaps(other_region):
                     key = (other_state.last_write_pipe, pipe)
                     if key not in emitted:
-                        eid = self._event_allocator.forward_event_id(*key)
-                        emitted[key] = SyncPair(*key, "waw_overlap", eid)
+                        emitted[key] = self._make_sync_pair(*key, "waw_overlap")
 
         # WAR overlap
         for write_name in write_tile_names:
@@ -208,8 +232,20 @@ class SyncTracker:
                     if _needs_sync(read_pipe):
                         key = (read_pipe, pipe)
                         if key not in emitted:
-                            eid = self._event_allocator.forward_event_id(*key)
-                            emitted[key] = SyncPair(*key, "war_overlap", eid)
+                            emitted[key] = self._make_sync_pair(*key, "war_overlap")
+
+    # -- pipeline fence (cross-core sync) -----------------------------------
+
+    def pipeline_fence(self) -> None:
+        """Clear all buffer states after a pipeline fence.
+
+        Called when the parser encounters ``wait_cross_core``.  While the
+        core blocks waiting for the cross-core signal, all previously
+        issued pipeline operations complete.  Clearing the states prevents
+        the tracker from emitting redundant forward syncs for dependencies
+        that were already resolved by the fence.
+        """
+        self._buffer_states.clear()
 
     # -- loop state management ---------------------------------------------
 
@@ -223,10 +259,26 @@ class SyncTracker:
         self._current_loop_depth += 1
 
     def exit_loop(self) -> LoopContext:
-        """Pop and return the LoopContext, restoring pre-loop buffer states."""
+        """Pop and return the LoopContext, restoring pre-loop buffer states.
+
+        After restoring the snapshot, merge back the ``last_write_pipe`` from
+        tiles that were written inside the loop body.  This allows post-loop
+        code (e.g. ``l0c_store`` after a k-loop) to see the dependency on the
+        loop's final write pipe (e.g. ``M``).
+        """
         self._current_loop_depth -= 1
         ctx = self._loop_context_stack.pop()
+        # Save end-of-loop states before restoring snapshot
+        end_of_loop_states = self._buffer_states
         self._buffer_states = ctx.pre_loop_snapshot
+        # Merge: tiles written in the loop keep their last_write_pipe
+        for name, end_state in end_of_loop_states.items():
+            if end_state.last_write_pipe is not None:
+                pre_state = self._buffer_states.get(name)
+                if pre_state is None or pre_state.last_write_pipe != end_state.last_write_pipe:
+                    state = self._buffer_states.setdefault(name, BufferState())
+                    state.last_write_pipe = end_state.last_write_pipe
+                    state.synced_to.clear()
         return ctx
 
     # -- if/else branch tracking -------------------------------------------

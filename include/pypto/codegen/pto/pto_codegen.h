@@ -251,7 +251,8 @@ class PTOCodegen : public CodegenBase {
   /**
    * @brief Emit alloc_tile for all MemRefs
    */
-  void EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs);
+  void EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs,
+                      const std::set<const ir::MemRef*>* only_these = nullptr);
 
   /**
    * @brief Emit alloc_tile for dynamically allocated tile buffers (e.g., reshape outputs)
@@ -303,6 +304,13 @@ class PTOCodegen : public CodegenBase {
 
   /// Dynamically allocated tile buffers (SSA name, type string) emitted at function scope
   std::vector<std::pair<std::string, std::string>> extra_alloc_tiles_;
+
+  /// MemRefs that belong exclusively to the Vector section (emit inside pto.section.vector)
+  std::set<const ir::MemRef*> vec_only_memrefs_;
+  /// MemRefs that belong exclusively to the Cube section (emit inside pto.section.cube)
+  std::set<const ir::MemRef*> cube_only_memrefs_;
+  /// All collected memrefs (for section-deferred emission)
+  std::vector<ir::MemRefPtr> all_memrefs_;
   /// Maps extra tile buffer SSA names to their type strings (for correct type annotations)
   std::map<std::string, std::string> extra_tile_buf_types_;
 
@@ -313,6 +321,11 @@ class PTOCodegen : public CodegenBase {
   /// YieldStmt yields an intermediate scalar: i64 addr for TileType; index offset for TensorType.
   /// IfStmt reconstruction then rebuilds the actual object (alloc_tile / addptr+make_tensor_view).
   int indirect_select_depth_ = 0;
+
+  /// Set of IR var names mapped directly to an i64 addr_ssa (not yet reconstructed as tile_buf).
+  /// Populated when an inner nested IfStmt (indirect_select_depth_ > 0) skips pto.alloc_tile
+  /// reconstruction so the outer yield can propagate the addr without overriding with static memref addr.
+  std::set<std::string> indirect_addr_vars_;
 
   // Current function context
   ir::FunctionPtr current_function_;

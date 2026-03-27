@@ -376,7 +376,8 @@ def _generate_caller_cpp(
     kernel_params: list[tuple[str, str, bool]],
     kernel_cpp_name: str,
     kernel_name: str,
-    has_cross_core_sync: bool = False
+    has_cross_core_sync: bool = False,
+    enable_print_debug: bool = False,
 ) -> str:
     """Generate extern "C" wrapper that calls the __global__ kernel.
     
@@ -385,6 +386,9 @@ def _generate_caller_cpp(
         kernel_cpp_name: Name of the kernel .cpp file to include
         kernel_name: Name of the kernel function to call
         has_cross_core_sync: Whether the kernel uses cross-core sync ops
+        enable_print_debug:
+            Reserved compatibility switch from compile(); currently this wrapper
+            does not need extra caller-side code changes for print debug.
     
     Returns:
         Generated caller.cpp content as string
@@ -514,6 +518,7 @@ def _build_bisheng_flags(toolkit_home: str, arch: str, cpp_content: str, has_cro
         common.extend([
             "--cce-enable-print",
             "-D_DEBUG",
+            "-DCCEBlockMaxSize=1048576",
             "-DPTOAS_ENABLE_CCE_PRINT=1",
         ])
     flags = [f"--cce-aicore-arch={npu_arch}"]
@@ -526,7 +531,9 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
     """Compile a PTO program to a shared library.
 
     Args:
-        prog: The PTO program to compile.
+        prog: The PTO program or KernelDef to compile.
+            If a :class:`KernelDef`, AST parsing is triggered with *arch*
+            to produce an ``ir.Program`` before code generation.
         clean_up: Whether to remove intermediate files after compilation.
         timeout: Compilation timeout in seconds.
         arch: Target architecture. Options: "a2", "a3", "a5".
@@ -535,6 +542,11 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
             - True: force enable device-side debug printing flags
             - False: force disable device-side debug printing flags
     """
+    # Deferred compilation: parse KernelDef → ir.Program with arch info
+    from pypto.frontend.kernel import KernelDef
+    if isinstance(prog, KernelDef):
+        prog = prog.parse(npu_arch=arch)
+
     arch = _normalize_arch(arch)
     backend.reset_for_testing()
     backend.set_backend_type(BackendType.PTO)
@@ -587,6 +599,8 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
                 break
     if kernel_name is None:
         raise RuntimeError("Could not find kernel name in generated C++ code")
+    resolved_enable_print_debug = needs_print_debug if enable_print_debug is None else enable_print_debug
+
     if has_cross_sync:
         kernel_params = kernel_params[:-1]
     caller_content = _generate_caller_cpp(
@@ -594,6 +608,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
         kernel_cpp_name="kernel.cpp",
         kernel_name=kernel_name,
         has_cross_core_sync=has_cross_sync,
+        enable_print_debug=resolved_enable_print_debug,
     )
     Path(final_kernel).write_text(caller_content, encoding="utf-8")
 
@@ -612,7 +627,6 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
         f"-I{ASCEND_HOME_PATH}/include/experiment/msprof",
     ]
     
-    resolved_enable_print_debug = needs_print_debug if enable_print_debug is None else enable_print_debug
     flags = _build_bisheng_flags(
         PTO_LIB_PATH,
         arch,
@@ -622,7 +636,7 @@ def compile(prog, clean_up=False, timeout=20, arch: str = "a3", enable_print_deb
     )
     flags.extend(runtime_includes)
     result = subprocess.run(
-        ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-o", lib_path],
+        ["bisheng", *flags, final_kernel, "-L", LD_LIB_PATH, "-lruntime", "-lprofapi", "-o", lib_path],
         check=False, timeout=timeout, capture_output=True
     )
     if result.returncode != 0:

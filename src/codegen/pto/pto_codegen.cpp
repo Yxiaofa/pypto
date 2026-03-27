@@ -71,16 +71,24 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
     return "f16";
   } else if (dtype == ::pypto::DataType::BF16) {
     return "bf16";
-  } else if (dtype == ::pypto::DataType::INT32) {
-    return "i32";
-  } else if (dtype == ::pypto::DataType::INDEX) {
-    return "index";
-  } else if (dtype == ::pypto::DataType::INT64) {
-    return "i64";
   } else if (dtype == ::pypto::DataType::INT8) {
     return "i8";
   } else if (dtype == ::pypto::DataType::UINT8) {
     return "ui8";
+  } else if (dtype == ::pypto::DataType::INT16) {
+    return "i16";
+  } else if (dtype == ::pypto::DataType::UINT16) {
+    return "ui16";
+  } else if (dtype == ::pypto::DataType::INT32) {
+    return "i32";
+  } else if (dtype == ::pypto::DataType::UINT32) {
+    return "ui32";
+  } else if (dtype == ::pypto::DataType::INDEX) {
+    return "index";
+  } else if (dtype == ::pypto::DataType::INT64) {
+    return "i64";
+  } else if (dtype == ::pypto::DataType::UINT64) {
+    return "ui64";
   } else if (dtype == ::pypto::DataType::BOOL) {
     return "i1";
   } else {
@@ -118,6 +126,11 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
     return memref_tile_types_;
   }
 
+  /// Returns true if the given memref was first seen inside a Cube section.
+  [[nodiscard]] bool IsCubeOnly(const ir::MemRef* m) const { return cube_memrefs_.count(m) > 0; }
+  /// Returns true if the given memref was first seen inside a Vector section.
+  [[nodiscard]] bool IsVecOnly(const ir::MemRef* m) const { return vec_memrefs_.count(m) > 0; }
+
   void VisitExpr_(const VarPtr& op) override {
     auto tile_type = As<TileType>(op->GetType());
     if (tile_type && tile_type->memref_.has_value()) {
@@ -132,10 +145,20 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
     }
   }
 
+  void VisitStmt_(const ir::SectionStmtPtr& op) override {
+    auto prev = current_section_;
+    current_section_ = op->section_kind_;
+    IRVisitor::VisitStmt_(op);
+    current_section_ = prev;
+  }
+
  private:
   std::vector<MemRefPtr> memrefs_;
   std::set<const ir::MemRef*> seen_ptrs_;
   std::map<const ir::MemRef*, std::shared_ptr<const TileType>> memref_tile_types_;
+  std::set<const ir::MemRef*> cube_memrefs_;
+  std::set<const ir::MemRef*> vec_memrefs_;
+  std::optional<ir::SectionKind> current_section_;
 
   void AddMemRefIfUnique(const MemRefPtr& memref, const std::shared_ptr<const TileType>& tile_type) {
     const ir::MemRef* raw_ptr = memref.get();
@@ -143,6 +166,9 @@ class MemRefCollectorVisitor : public ir::IRVisitor {
       memrefs_.push_back(memref);
       seen_ptrs_.insert(raw_ptr);
       memref_tile_types_[raw_ptr] = tile_type;
+      // Track section membership
+      if (current_section_ == ir::SectionKind::Cube) cube_memrefs_.insert(raw_ptr);
+      if (current_section_ == ir::SectionKind::Vector) vec_memrefs_.insert(raw_ptr);
     }
   }
 };
@@ -178,6 +204,9 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   // inside a while body) become proper scf.while iter_args with scf.yield.
   ir::ProgramPtr ssa_program = ir::pass::ConvertToSSA()(lowered);
 
+  // Fold constants and simplify if-stmts to reduce scalar ops in generated code.
+  ir::ProgramPtr opt_program = ir::pass::ConstFoldAndSimplify()(ssa_program);
+
   stream_.str("");
   stream_.clear();
   constants_section_.str("");
@@ -191,7 +220,7 @@ std::string PTOCodegen::Generate(const ProgramPtr& program) {
   stream_ << "module {\n";
   indent_level_++;
 
-  for (const auto& [gvar, func] : ssa_program->functions_) {
+  for (const auto& [gvar, func] : opt_program->functions_) {
     if (func->func_type_ == ir::FunctionType::Orchestration) {
       throw pypto::ValueError(
           "PTO backend does not support Orchestration functions. "
@@ -227,6 +256,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   extra_tile_buf_types_.clear();
   tuple_var_to_make_tuple_.clear();
   indirect_select_depth_ = 0;
+  indirect_addr_vars_.clear();
   constants_section_.str("");
   constants_section_.clear();
   body_section_.str("");
@@ -245,6 +275,14 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
     memref_to_mlir_[memref.get()] = tile_buf;
   }
   memref_to_tile_type_ = collector.GetMemRefTileTypes();
+  // Track section-specific memrefs for deferred emission inside sections
+  vec_only_memrefs_.clear();
+  cube_only_memrefs_.clear();
+  all_memrefs_ = collector.GetMemRefs();
+  for (const auto& memref : all_memrefs_) {
+    if (collector.IsVecOnly(memref.get())) vec_only_memrefs_.insert(memref.get());
+    if (collector.IsCubeOnly(memref.get())) cube_only_memrefs_.insert(memref.get());
+  }
 
   // Collect ordered unique dynamic dimension variables from tensor parameter shapes
   std::vector<std::string> dyn_var_names;
@@ -443,9 +481,14 @@ void PTOCodegen::EmitMakeTensorViews(const FunctionPtr& func) {
   }
 }
 
-void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs) {
+void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<ir::MemRefPtr>& memrefs,
+                                 const std::set<const ir::MemRef*>* only_these) {
   (void)func;
   for (const auto& memref : memrefs) {
+    // If only_these is specified, skip memrefs not in the set
+    if (only_these && only_these->find(memref.get()) == only_these->end()) continue;
+    // If emitting at function top (only_these is null), skip section-specific memrefs
+    if (!only_these && (vec_only_memrefs_.count(memref.get()) || cube_only_memrefs_.count(memref.get()))) continue;
     std::string tile_buf = memref_to_mlir_[memref.get()];
 
     // Collect dynamic valid_shape variable names if present
@@ -566,7 +609,7 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
       VisitExpr(op->value_);
       // Built-in tile-producing ops often write directly to current_result_buf_
       // without producing a separate SSA value in current_expr_value_. Record the
-      // assigned buffer name so later uses like block.print(tile) can resolve it.
+      // assigned buffer name so later uses like debug.dump_tile(tile) can resolve it.
       if (result_tile_type && !current_result_buf_.empty()) {
         var_to_mlir_[op->var_->name_] = current_result_buf_;
       }
@@ -588,6 +631,32 @@ void PTOCodegen::VisitStmt_(const AssignStmtPtr& op) {
   if (auto make_tuple = As<ir::MakeTuple>(op->value_)) {
     tuple_var_to_make_tuple_[op->var_->name_] = make_tuple;
     return;
+  }
+  // TupleGetItemExpr that resolves to a nested MakeTuple (e.g. from inlined function
+  // returning tuple-of-tuples): propagate the inner MakeTuple to the new var name.
+  if (auto tgi = As<ir::TupleGetItemExpr>(op->value_)) {
+    if (auto tuple_var = As<ir::Var>(tgi->tuple_)) {
+      auto it = tuple_var_to_make_tuple_.find(tuple_var->name_);
+      if (it != tuple_var_to_make_tuple_.end()) {
+        const auto& elems = it->second->elements_;
+        if (tgi->index_ >= 0 && tgi->index_ < static_cast<int>(elems.size())) {
+          auto elem = elems[tgi->index_];
+          // Element is a Var pointing to another MakeTuple — propagate registration
+          if (auto elem_var = As<ir::Var>(elem)) {
+            auto inner_it = tuple_var_to_make_tuple_.find(elem_var->name_);
+            if (inner_it != tuple_var_to_make_tuple_.end()) {
+              tuple_var_to_make_tuple_[op->var_->name_] = inner_it->second;
+              return;
+            }
+          }
+          // Element is a MakeTuple directly
+          if (auto inner_mt = As<ir::MakeTuple>(elem)) {
+            tuple_var_to_make_tuple_[op->var_->name_] = inner_mt;
+            return;
+          }
+        }
+      }
+    }
   }
   VisitExpr(op->value_);
   // mapping arith var name to mlir mapping
@@ -1128,15 +1197,26 @@ void PTOCodegen::VisitStmt_(const YieldStmtPtr& op) {
 
     if (indirect_select_depth_ > 0) {
       if (auto tile_type = As<TileType>(expr->GetType())) {
-        // Yield i64 addr instead of tile_buf for TileType in indirect-select scf.if
-        std::string addr_operand;
-        if (tile_type->memref_.has_value() && tile_type->memref_.value()->addr_) {
-          if (auto ca = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
-            addr_operand = GetOrEmitI64Constant(ca->value_);
-          }
+        // Yield i64 addr instead of tile_buf for TileType in indirect-select scf.if.
+        // If expr is a Var whose name is in indirect_addr_vars_, it was already mapped
+        // directly to an addr_ssa by the inner IfStmt reconstruction (to avoid emitting
+        // a dead pto.alloc_tile). In that case, val already holds the correct i64 addr —
+        // don't override with the static memref addr.
+        bool is_indirect_addr_var = false;
+        if (auto var = As<ir::Var>(expr)) {
+          is_indirect_addr_var = (indirect_addr_vars_.count(var->name_) > 0);
         }
-        if (addr_operand.empty()) addr_operand = GetOrEmitI64Constant(0);
-        val = addr_operand;
+        if (!is_indirect_addr_var) {
+          std::string addr_operand;
+          if (tile_type->memref_.has_value() && tile_type->memref_.value()->addr_) {
+            if (auto ca = As<ir::ConstInt>(tile_type->memref_.value()->addr_)) {
+              addr_operand = GetOrEmitI64Constant(ca->value_);
+            }
+          }
+          if (addr_operand.empty()) addr_operand = GetOrEmitI64Constant(0);
+          val = addr_operand;
+        }
+        // else: val already holds addr_ssa (e.g., "%57") — keep as-is
       } else if (auto tensor_type = As<TensorType>(expr->GetType())) {
         // TensorType: yield index offset instead of ptr for indirect-select scf.if.
         // The scf.if yields an index (addptr offset), then IfStmt reconstruction emits
@@ -1179,6 +1259,16 @@ void PTOCodegen::VisitStmt_(const ir::SectionStmtPtr& op) {
   // Emit pto.section.{vector|cube} {
   Emit("pto.section." + section_name + " {");
   indent_level_++;
+
+  // Emit section-specific tile allocations at the top of the section
+  const std::set<const ir::MemRef*>* section_memrefs = nullptr;
+  if (op->section_kind_ == ir::SectionKind::Cube && !cube_only_memrefs_.empty())
+    section_memrefs = &cube_only_memrefs_;
+  if (op->section_kind_ == ir::SectionKind::Vector && !vec_only_memrefs_.empty())
+    section_memrefs = &vec_only_memrefs_;
+  if (section_memrefs)
+    EmitAllocTiles(nullptr, all_memrefs_, section_memrefs);
+
   VisitStmt(op->body_);
   indent_level_--;
   Emit("}");
@@ -1333,13 +1423,22 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
       if (!needs_indirect_yield[rv_idx]) continue;
       const auto& return_var = op->return_vars_[rv_idx];
       if (auto tile_type = As<TileType>(return_var->GetType())) {
-        // TileType: reconstruct tile_buf from the i64 addr returned by scf.if
-        std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
         std::string addr_ssa = return_var_names[rv_idx];
-        std::string tile_name = NewTemp();
-        Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
-        var_to_mlir_[return_var->name_] = tile_name;
-        extra_tile_buf_types_[tile_name] = tile_buf_type;
+        if (indirect_select_depth_ > 0) {
+          // Inside an outer indirect-select chain: skip pto.alloc_tile.
+          // Map var directly to addr_ssa so the outer yield can propagate it as i64
+          // without overriding with the static memref addr.
+          var_to_mlir_[return_var->name_] = addr_ssa;
+          indirect_addr_vars_.insert(return_var->name_);
+        } else {
+          // Outermost level: reconstruct tile_buf from the dynamically selected addr.
+          std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
+          std::string tile_name = NewTemp();
+          Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
+          var_to_mlir_[return_var->name_] = tile_name;
+          extra_tile_buf_types_[tile_name] = tile_buf_type;
+          indirect_addr_vars_.erase(return_var->name_);
+        }
       } else if (auto tensor_type = As<TensorType>(return_var->GetType())) {
         // TensorType: reconstruct tensor_view from (base ptr, selected index offset) returned by scf.if.
         // 1. Read base_ptr from the PtrType annotation stored in the tensor's TensorView::ptr.

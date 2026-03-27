@@ -37,6 +37,8 @@ Typical usage:
         return x
 """
 
+from typing import Any
+
 from pypto.pypto_core import DataType
 from pypto.pypto_core.ir import ForKind, FunctionType, MemorySpace, MemRef, PipeType, TensorLayout
 
@@ -138,6 +140,27 @@ from .parser.decorator import InlineFunction, KernelFunction, func, function, in
 from .parser.text_parser import loads, loads_program, parse, parse_program
 from .typing import DynVar, InOut, IntLike, Out, Ptr, Scalar, Tensor, Tile, dynamic
 from .typing.tensor import TensorViewSpec as view
+
+
+def struct(**kwargs: Any) -> Any:
+    """Create a compile-time struct grouping IR expressions for attribute access.
+
+    Args:
+        **kwargs: Named fields mapping to IR expressions or Python values.
+
+    Returns:
+        Struct object whose fields can be accessed as ``s.field_name``.
+
+    Example::
+
+        ctx = pl.struct(sq_off=sq_off, buf_idx=buf_idx)
+        # later: ctx.sq_off, ctx.buf_idx
+    """
+    # The parser handles pl.struct() syntactically; this stub exists for
+    # IDE autocompletion and runtime import validation only.
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    return SimpleNamespace(**kwargs)
 
 # Re-export TensorLayout constants for convenience
 ND = TensorLayout.ND
@@ -284,6 +307,7 @@ __all__ = [
     # Ptr ops
     "make_tensor",
     "addptr",
+    "struct",
     "FunctionType",
     "ForKind",
     "MemRef",

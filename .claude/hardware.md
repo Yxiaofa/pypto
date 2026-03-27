@@ -7,9 +7,13 @@
 - **Vector cores**: Vector/scalar ops (TVEC, element-wise). Each Cube core has 2 paired Vector sub-blocks.
 - `get_block_idx()` → current core index (returns i64, needs `index_cast` for index arithmetic).
 - `get_subblock_idx()` → Vector sub-block index: 0 or 1.
-- `get_block_num()` → total core count.
+- `get_block_num()` → total number of **Cube** cores (same value in both sections).
 - For Cube-only: `get_block_idx()` = Cube core index.
-- For Mix (Cube+Vector): `get_block_idx() // 2` = corresponding Cube core index.
+- For Mix (Cube+Vector) with `section_cube()`/`section_vector()`:
+  - **Cube section**: `get_block_idx()` = Cube core index (0..num_cores-1).
+  - **Vector section**: `get_block_idx()` = paired Cube core index (0..num_cores-1). **No `// 2` needed** when using section_cube/section_vector separation.
+  - `get_subblock_idx()` = 0 or 1 (two sub-blocks per Vector core).
+  - NOTE: the CLAUDE.md rule "use `get_block_idx() // 2`" applies to non-sectioned Mix mode, NOT when using section_cube/section_vector.
 
 ### Memory Hierarchy
 
@@ -147,10 +151,55 @@ Requires `pto.set_ffts` in MLIR (auto-injected by `jit.py` when `has_cross_sync=
 
 ### Barriers
 ```python
-pl.system.bar_v()     # Vector cores synchronize
-pl.system.bar_m()     # Cube cores synchronize
-pl.system.bar_all()   # All cores synchronize (both Cube and Vector)
+pl.system.bar_v()     # pipe_barrier(PIPE_V) — drain Vector pipeline before next TVEC op
+pl.system.bar_m()     # pipe_barrier(PIPE_M) — drain Cube pipeline
+pl.system.bar_all()   # pipe_barrier(PIPE_ALL) — drain all pipelines
 ```
+
+### pipe_barrier(PIPE_V) — MANDATORY on a2/a3 for dependent TVEC ops
+
+On Ascend a2/a3, the vector pipeline does **NOT** automatically enforce data dependencies between TVEC instructions. Without `pl.system.bar_v()`, later ops read **stale data** from the vector unit. This causes **silent wrong results** — no compile error, no runtime error.
+
+**Required barrier locations** (from reference `pto_macro_fa_softmax.hpp`):
+```python
+plm.row_max(reduce_dst, qk_vec, tmp_vec)
+pl.system.bar_v()    # TROWMAX → read reduce_dst
+plm.maximum(reduce_dst_rm, reduce_dst_rm, global_max_rm)
+pl.system.bar_v()    # TMAX → TSUB
+plm.sub(exp_corr_rm, global_max_rm, reduce_dst_rm)
+pl.system.bar_v()    # TSUB → TMULS(copy)
+plm.muls(global_max_rm, reduce_dst_rm, 1.0)
+pl.system.bar_v()    # TMULS → TROWEXPANDSUB
+# interleaved independent ops (no barrier needed between them):
+plm.row_expand_sub(tmp_vec, qk_vec, reduce_dst)    # [64,128]
+plm.muls(exp_corr_rm, exp_corr_rm, SCALE)          # [1,64]
+plm.muls(tmp_vec, tmp_vec, SCALE)                   # [64,128]
+plm.exp(exp_corr_rm, exp_corr_rm)                   # [1,64]
+plm.exp(qk_vec, tmp_vec)                            # [64,128]
+plm.cast(p_f16, qk_vec, ...)
+pl.system.bar_v()    # TEXP/TCVT → TMUL, TROWSUM
+plm.mul(global_sum_rm, global_sum_rm, exp_corr_rm)
+plm.row_sum(reduce_dst, qk_vec, tmp_vec)
+pl.system.bar_v()    # TROWSUM → TADD
+plm.add(global_sum_rm, global_sum_rm, reduce_dst_rm)
+```
+
+**Pattern**: barrier after every op whose output is consumed by the **next** op with a RAW dependency. Interleaved independent ops on **different tiles** can run without barriers.
+
+### VEC Reduce Tile Aliasing for Element-wise Ops
+
+TVEC element-wise ops (TMAX, TSUB, TEXP, TMUL, TADD) require **RowMajor blayout**. TROW* reduce/expand ops use **ColMajor [64,1]**. Solution: alias same address with both shapes:
+```python
+# ColMajor [64,1] — for TROWMAX/TROWSUM/TROWEXPAND*
+reduce_dst = plm.make_tile(plm.TileType(shape=[64, 1], dtype=pl.FP32,
+    target_memory=pl.MemorySpace.Vec, blayout=2), addr=ADDR, size=256)
+# RowMajor [1,64] — for TMAX/TSUB/TMUL/TADD/TEXP (same address!)
+reduce_dst_rm = plm.make_tile(plm.TileType(shape=[1, 64], dtype=pl.FP32,
+    target_memory=pl.MemorySpace.Vec), addr=ADDR, size=256)
+```
+Both views share 64 sequential FP32 values (256 bytes). The hardware tile constraints:
+- RowMajor: `Cols * sizeof(dtype) >= 32 bytes` → [1,64] FP32: 64×4=256 ✓
+- ColMajor: `Rows * sizeof(dtype) >= 32 bytes` → [64,1] FP32: 64×4=256 ✓
 
 ### Critical Sync Rules
 
@@ -209,6 +258,21 @@ Cube Section:                          Vector Section:
 ```
 
 **The `wait_cross_core(M, P_READY)` is mandatory.** Without it, Cube reads stale p_buf.
+
+### Multi-Core pv_buf Addressing
+
+Each Cube/Vector core pair needs its own region in pv_buf (Cube→Vector transfer buffer). With double-buffered Q tiles (`q_mat_idx = q_count % 2`), each core needs `2 * TS` rows:
+```python
+PV_CORE_STRIDE = 2 * TS    # 256 rows per core
+# Cube (l0c_store):
+offset = core_id * PV_CORE_STRIDE + q_mat_idx * TS
+plm.l0c_store(acc, [offset, 0], [TS, TD], pv_buf)
+# Vector (load):
+plm.load(running_o, pv_buf, [core_id * PV_CORE_STRIDE + q_mat_idx * TS + row_off, 0])
+```
+pv_buf shape: `[48 * TS, D]` supports up to 24 cores (`24 * 2 * TS = 48 * TS`).
+
+**Bug to avoid**: Using a wrong stride constant (e.g., `core_id * 24` instead of `core_id * 2 * TS`) causes cores to write overlapping regions → corrupted PV data.
 
 ### Vector Section: Sub-Block Processing
 Each Vector core has 2 sub-blocks (sub_id = 0 or 1). Each processes TILE/2 rows.

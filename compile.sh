@@ -12,7 +12,7 @@ export PYTHONPATH=$MLIR_PYTHON_ROOT:$PTO_PYTHON_ROOT:$PYTHONPATH
 export LD_LIBRARY_PATH=$LLVM_BUILD_DIR/lib:$PTO_INSTALL_DIR/lib:$LD_LIBRARY_PATH
 export PATH=$PTO_SOURCE_DIR/build/tools/ptoas:$PATH
 
-pip3 install -e .
+#pip3 install -e .
 source /data/g00895580/Ascend/cann/bin/setenv.bash
 source /data/g00895580/Ascend/cann-8.5.0/set_env.sh
 source /data/g00895580/Ascend/ascend-toolkit/set_env.sh

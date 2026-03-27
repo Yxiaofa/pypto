@@ -113,12 +113,14 @@ set(PYPTO_SOURCES
     src/ir/op/tensor_ops/reduction.cpp
     src/ir/op/tensor_ops/transform.cpp
     src/ir/op/tensor_ops/unary.cpp
+    src/ir/op/debug_ops.cpp
     src/ir/op/ptr_ops.cpp
     src/ir/op/testing.cpp
     src/ir/op/type_inference.cpp
 
     # IR - Transforms
     src/ir/transforms/ir_property.cpp
+    src/ir/transforms/const_fold_simplify_pass.cpp
     src/ir/transforms/convert_to_ssa_pass.cpp
     src/ir/transforms/lower_break_continue_pass.cpp
     src/ir/transforms/insert_sync_pass.cpp
