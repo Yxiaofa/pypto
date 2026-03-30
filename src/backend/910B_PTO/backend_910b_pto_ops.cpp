@@ -1426,9 +1426,10 @@ static std::string MakeSetCrossCoreCodegenPTO(const CallPtr& op, codegen::Codege
   auto& codegen = dynamic_cast<codegen::PTOCodegen&>(codegen_base);
   auto pipe = op->GetKwarg<int>("pipe");
   auto event_id = op->GetKwarg<int>("event_id");
+  auto mode_id = op->GetKwarg<int>("mode_id");
   std::ostringstream oss;
   oss << "pto.sync.set #pto.pipe<PIPE_" << GetPipeTypeName(static_cast<ir::PipeType>(pipe))
-      << ">, " << event_id;
+      << ">, " << event_id <<  " {ffts_mode = " << mode_id <<" : i32}";
   codegen.Emit(oss.str());
   return "";
 }
@@ -1532,23 +1533,23 @@ static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::Codeg
   if (arch_val == "dav-c220") {
     codegen.Emit("pto.barrier #pto.pipe<PIPE_ALL>");
     if (aiv_only) {
-      oss << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL << "\n      "
+      oss << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL << " {ffts_mode = 0 : i32}" << "\n      "
           << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL;
       codegen.Emit(oss.str());
       return "";
     }
     // AIC
     oss << "pto.section.cube {" << "\n      "
-        << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_FLAG << "\n      "
-        // << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
-        // << "pto.sync.wait #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIV_FLAG << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << " {ffts_mode = 0 : i32}" << "\n      "
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIC_FLAG << "\n      "
         << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n    }";
     codegen.Emit(oss.str());
     // AIV
     oss.str("");
     oss << "pto.section.vector {" << "\n      "
         << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_FLAG << "\n      "
-        << "pto.sync.wait #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n    }";
+        << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIC_AIV_FLAG << "\n    }";
     codegen.Emit(oss.str());
   } else if (arch_val == "dav-c310") {
     if (aiv_only) {
@@ -1556,10 +1557,10 @@ static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::Codeg
       std::string trigger_pipe_str = PipeTypeToString(static_cast<ir::PipeType>(trigger_pipe_val));
       codegen.Emit(" pto.barrier #pto.pipe<PIPE_" + trigger_pipe_str + ">");
       if (trigger_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
-        oss << " pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL;
+        oss << " pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIV_ONLY_ALL << " {ffts_mode = 0 : i32}";
         codegen.Emit(oss.str());
       } else {
-        oss << " pto.sync.set #pto.pipe<PIPE_" << trigger_pipe_str << ">, " << SYNC_AIV_ONLY_ALL;
+        oss << " pto.sync.set #pto.pipe<PIPE_" << trigger_pipe_str << ">, " << SYNC_AIV_ONLY_ALL << " {ffts_mode = 0 : i32}";
         codegen.Emit(oss.str());
       }
       if (wait_pipe_val == static_cast<int>(ir::PipeType::ALL)) {
@@ -1580,10 +1581,10 @@ static std::string MakeSystemSyncAllCodegenPTO(const CallPtr& op, codegen::Codeg
     oss << "pto.section.cube {" << "\n      "
         << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIV_FLAG << "\n      "
         << "pto.sync.wait #pto.pipe<PIPE_S>, " << (SYNC_AIV_FLAG + SYNC_FLAG_ID_MAX) << "\n      "
-        // << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << "\n      "
+        // << "pto.sync.set #pto.pipe<PIPE_FIX>, " << SYNC_AIC_FLAG << " {ffts_mode = 0 : i32}" << "\n      "
         // << "pto.sync.wait #pto.pipe<PIPE_S>, " << SYNC_AIC_FLAG << "\n      "
-        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << SYNC_AIC_AIV_FLAG << "\n      "
-        << "pto.sync.set #pto.pipe<PIPE_MTE3>, " << (SYNC_AIC_AIV_FLAG + SYNC_FLAG_ID_MAX) << "\n    }";
+        << "pto.sync.set #pto.pipe<PIPE_S>, " << SYNC_AIC_AIV_FLAG << "\n      "
+        << "pto.sync.set #pto.pipe<PIPE_S>, " << (SYNC_AIC_AIV_FLAG + SYNC_FLAG_ID_MAX) << "\n    }";
     codegen.Emit(oss.str());
     // AIV
     oss.str("");

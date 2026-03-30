@@ -107,6 +107,7 @@ REGISTER_OP("system.set_cross_core")
     .no_argument()
     .set_attr<int>("pipe")
     .set_attr<int>("event_id")
+    .set_attr<int>("mode_id")
     .f_deduce_type(DeduceUnknownType);
 
 // Register system.wait_cross_core (Wait Cross Core Flag)

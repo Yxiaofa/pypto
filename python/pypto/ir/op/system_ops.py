@@ -121,6 +121,7 @@ def set_cross_core(
     pipe: PipeType,
     event_id: int | Expr,
     max_event_id: int = 16,
+    mode_id: int = 2,
     span: Span | None = None,
 ) -> Call:
     """Set for a synchronization signal (Cross core).
@@ -139,7 +140,7 @@ def set_cross_core(
         return _ir_core.create_op_call(
             "system.set_cross_core_dyn", [event_id],
             {"pipe": pipe, "max_event_id": max_event_id}, actual_span)
-    kwargs = {"pipe": pipe, "event_id": event_id}
+    kwargs = {"pipe": pipe, "event_id": event_id, "mode_id": mode_id}
     return _ir_core.create_op_call("system.set_cross_core", [], kwargs, actual_span)
 
 def wait_cross_core(
