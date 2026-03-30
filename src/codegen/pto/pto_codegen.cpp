@@ -255,6 +255,7 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   extra_alloc_tiles_.clear();
   extra_tile_buf_types_.clear();
   tuple_var_to_make_tuple_.clear();
+  tile_valid_shapes_.clear();
   indirect_select_depth_ = 0;
   indirect_addr_vars_.clear();
   constants_section_.str("");
@@ -367,6 +368,15 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   }
 
   auto saved_stream = std::move(stream_);
+
+  // Emit Tiles and Tensors create
+  std::ostringstream alloc_tiles_buffer;
+  stream_ = std::move(alloc_tiles_buffer);
+  EmitMakeTensorViews(func);
+  EmitAllocTiles(func, collector.GetMemRefs());
+  EmitExtraAllocTiles();
+  std::string alloc_tiles_content = stream_.str();
+
   stream_ = std::move(body_section_);
 
   if (func->body_) {
@@ -376,21 +386,11 @@ void PTOCodegen::GenerateFunction(const FunctionPtr& func) {
   std::string body_content = stream_.str();
   stream_ = std::move(saved_stream);
 
-  // Step 1: Emit AllocTiles to a temporary buffer to collect i64 constants for addr operands
-  std::ostringstream alloc_tiles_buffer;
-  auto saved_stream_for_alloc = std::move(stream_);
-  stream_ = std::move(alloc_tiles_buffer);
-  EmitMakeTensorViews(func);
-  EmitAllocTiles(func, collector.GetMemRefs());
-  EmitExtraAllocTiles();
-  std::string alloc_tiles_content = stream_.str();
-  stream_ = std::move(saved_stream_for_alloc);
-
-  // Step 2: Output constants_section_ FIRST (includes i64 constants for addr operands)
+  // Step 1: Output constants_section_ FIRST (includes i64 constants for addr operands)
   stream_ << constants_section_.str();
-  // Step 3: Then output alloc_tiles (which references the i64 constants)
+  // Step 2: Then output alloc_tiles (which references the i64 constants)
   stream_ << alloc_tiles_content;
-  // Step 4: Finally output the body
+  // Step 3: Finally output the body
   stream_ << body_content;
   stream_ << GetIndent() << "return\n";
 
@@ -538,6 +538,11 @@ void PTOCodegen::EmitAllocTiles(const ir::FunctionPtr& func, const std::vector<i
     if (!valid_col_mlir.empty()) line << " valid_col = " << valid_col_mlir;
     line << " : " << GetTileBufTypeString(memref.get());
     stream_ << GetIndent() << line.str() << "\n";
+
+    // Initialize tile→valid_shape mapping for dynamic tiles
+    if (!valid_row_mlir.empty() && !valid_col_mlir.empty()) {
+      UpdateTileValidShape(tile_buf, valid_row_mlir, valid_col_mlir);
+    }
   }
 }
 
@@ -1019,6 +1024,21 @@ void PTOCodegen::SetTensorViewName(const std::string& ir_name, const std::string
   tensor_to_view_[ir_name] = mlir_name;
 }
 
+void PTOCodegen::UpdateTileValidShape(const std::string tile, const std::string& row,
+                                      const std::string& col) {
+  tile_valid_shapes_[tile] = {row, col};
+}
+
+std::pair<std::string, std::string> PTOCodegen::GetTileValidShape(const std::string tile) const {
+  auto it = tile_valid_shapes_.find(tile);
+  INTERNAL_CHECK(it != tile_valid_shapes_.end()) << "Tile valid_shape not found in mapping";
+  return it->second;
+}
+
+bool PTOCodegen::IsDynamicTileType(const std::string tile_type) const {
+  return tile_type.find("v_row=?, v_col=?") != std::string::npos;
+}
+
 // ========================================================================
 // Control flow helpers
 // ========================================================================
@@ -1434,10 +1454,28 @@ void PTOCodegen::VisitStmt_(const IfStmtPtr& op) {
           // Outermost level: reconstruct tile_buf from the dynamically selected addr.
           std::string tile_buf_type = GetTileBufTypeStringFromTileType(tile_type);
           std::string tile_name = NewTemp();
-          Emit(tile_name + " = pto.alloc_tile addr = " + addr_ssa + " : " + tile_buf_type);
+
+          std::string valid_row_mlir;
+          std::string valid_col_mlir;
+          bool is_dynamic = IsDynamicTileType(tile_buf_type);
+          if (is_dynamic) {
+            valid_row_mlir = GetExprAsCode(tile_type->shape_[0]);
+            valid_col_mlir = GetExprAsCode(tile_type->shape_[1]);
+          }
+
+          std::ostringstream alloc_line;
+          alloc_line << tile_name << " = pto.alloc_tile addr = " << addr_ssa;
+          if (!valid_row_mlir.empty()) alloc_line << " valid_row = " << valid_row_mlir;
+          if (!valid_col_mlir.empty()) alloc_line << " valid_col = " << valid_col_mlir;
+          alloc_line << " : " << tile_buf_type;
+          Emit(alloc_line.str());
           var_to_mlir_[return_var->name_] = tile_name;
           extra_tile_buf_types_[tile_name] = tile_buf_type;
           indirect_addr_vars_.erase(return_var->name_);
+
+          if (is_dynamic) {
+            UpdateTileValidShape(tile_name, valid_row_mlir, valid_col_mlir);
+          }
         }
       } else if (auto tensor_type = As<TensorType>(return_var->GetType())) {
         // TensorType: reconstruct tensor_view from (base ptr, selected index offset) returned by scf.if.
@@ -1801,6 +1839,7 @@ void PTOCodegen::GenerateHelperFunction(const FunctionPtr& func) {
   memref_to_tile_type_.clear();
   emitted_constants_.clear();
   emitted_i64_constants_.clear();
+  tile_valid_shapes_.clear();
   constants_section_.str("");
   constants_section_.clear();
   current_expr_value_ = "";

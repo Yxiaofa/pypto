@@ -104,6 +104,7 @@ from .op.manual_ops import (
     rsqrt,
     sel,
     sels,
+    set_validshape,
     shl,
     shls,
     shr,
@@ -177,6 +178,8 @@ __all__ = [
     "gemv", "gemv_acc", "gemv_bias",
     # Layout
     "reshape", "transpose",
+    # Metadata
+    "set_validshape",
     # DataType constants
     "FP4", "FP8E4M3FN", "FP8E5M2", "FP16", "FP32", "BF16", "HF4", "HF8",
     "INT4", "INT8", "INT16", "INT32", "INT64",

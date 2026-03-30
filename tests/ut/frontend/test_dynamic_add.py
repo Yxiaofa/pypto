@@ -57,18 +57,21 @@ def dynamic_add_kernel(
             for j in pl.range(0, N_dim, 128):
                 # Barrier at start: ensure previous iteration's store is complete
                 pl.system.bar_all()
-                m_offset = pl.min(M_dim - i, 64)
-                n_offset = pl.min(N_dim - i, 128)
-                plm.load(tile_a, x, [i, j], [m_offset, n_offset])
-                plm.load(tile_b, y, [i, j], [m_offset, n_offset])
+                m_size = pl.min(M_dim - i, 64)
+                n_size = pl.min(N_dim - j, 128)
+                plm.set_validshape(tile_a, m_size, n_size)
+                plm.load(tile_a, x, [i, j])
+                plm.set_validshape(tile_b, m_size, n_size)
+                plm.load(tile_b, y, [i, j])
                 # Sync: wait for load (MTE2) to complete before compute (V)
                 pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                 pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
+                plm.set_validshape(tile_c, m_size, n_size)
                 plm.add(tile_c, tile_a, tile_b)
                 # Sync: wait for compute (V) to complete before store (MTE3)
                 pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
                 pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=1)
-                plm.store(z, tile_c, [i, j], [m_offset, n_offset])
+                plm.store(z, tile_c, [i, j])
     return z
 
 

@@ -173,6 +173,15 @@ class PTOCodegen : public CodegenBase {
   /** @brief Register IR var name → MLIR view name in both var_to_mlir_ and tensor_to_view_. */
   void SetTensorViewName(const std::string& ir_name, const std::string& mlir_name);
 
+  /** @brief Update tile→valid_shape mapping (called by set_validshape codegen). */
+  void UpdateTileValidShape(const std::string tile, const std::string& row, const std::string& col);
+
+  /** @brief Get tile valid_shape SSA pair from mapping. INTERNAL_CHECK if key absent. */
+  std::pair<std::string, std::string> GetTileValidShape(const std::string tile) const;
+
+  /** @brief Check if tile is dynamic */
+  [[nodiscard]] bool IsDynamicTileType(const std::string tile_type) const;
+
   /**
    * @brief Get raw pointer (%argN) for a tensor variable
    *
@@ -294,6 +303,8 @@ class PTOCodegen : public CodegenBase {
   std::map<const ir::MemRef*, std::string> memref_to_mlir_;
   std::map<std::string, const ir::MemRef*> var_to_memref_;
   std::map<const ir::MemRef*, std::shared_ptr<const ir::TileType>> memref_to_tile_type_;
+  /// tile SSA → (valid_row SSA, valid_col SSA), initialised in EmitAllocTiles, updated by set_validshape
+  std::map<std::string, std::pair<std::string, std::string>> tile_valid_shapes_;
   std::set<int64_t> emitted_constants_;
   std::set<double> emitted_float_constants_;
   std::map<double, std::string> float_const_names_;

@@ -218,7 +218,6 @@ def load(
     out: Tile,
     tensor: Tensor,
     offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr] | None = None,
     layout: str | None = None,
 ) -> None:
     """Load data from a global tensor into a pre-allocated tile.
@@ -227,21 +226,17 @@ def load(
         out: Pre-allocated destination tile; rebound on return.
         tensor: Source global tensor.
         offsets: Per-dimension offsets into the tensor.
-        shapes: Number of elements to load in each dimension. When omitted,
-            no ``pto.set_validshape`` instruction is emitted and the full
-            tile allocation size is used.
         layout: Tensor memory layout. ``"dn"`` for column-major (DN) layout,
             which lets TLOAD transpose on-chip. Default is row-major (ND).
     """
     if layout != "dn":
         _check_nd_load_bounds(out, tensor)
-    shapes_tuple = _ir_core.MakeTuple([], _span()) if shapes is None else _to_make_tuple(shapes)
     kwargs: dict = {}
     if layout is not None:
         kwargs["layout"] = layout
     _op(
         "manual.load",
-        [tensor.unwrap(), _to_make_tuple(offsets), shapes_tuple],
+        [tensor.unwrap(), _to_make_tuple(offsets)],
         out,
         **kwargs,
     )
@@ -269,7 +264,6 @@ def store(
     output_tensor: Tensor,
     tile: Tile,
     offsets: Sequence[int | Expr],
-    shapes: Sequence[int | Expr] | None = None,
 ) -> Tensor:
     """Store data from a tile back to a global tensor.
 
@@ -277,19 +271,15 @@ def store(
         output_tensor: Destination tensor.
         tile: Source tile.
         offsets: Per-dimension offsets into the output tensor.
-        shapes: Shape of the region to store. When omitted, no
-            ``pto.set_validshape`` instruction is emitted and the full tile
-            allocation size is used.
 
     Returns:
         Tensor wrapping the store result.
     """
     span = _span()
     offsets_tuple = _to_make_tuple(offsets)
-    shapes_tuple = _ir_core.MakeTuple([], span) if shapes is None else _to_make_tuple(shapes)
     return Tensor(expr=_ir_core.create_op_call(
         "manual.store",
-        [tile.unwrap(), offsets_tuple, shapes_tuple, output_tensor.unwrap()],
+        [tile.unwrap(), offsets_tuple, output_tensor.unwrap()],
         {},
         span,
     ))
@@ -823,6 +813,24 @@ def transpose(tile: Tile, axis1: int, axis2: int, out: Tile) -> None:
     _op("manual.transpose", [tile.unwrap()], out, axis1=axis1, axis2=axis2)
 
 
+def set_validshape(
+    tile: Tile,
+    row: int | Expr | Scalar,
+    col: int | Expr | Scalar,
+) -> None:
+    """Update valid-shape metadata on a dynamic tile in place.
+
+    Args:
+        tile: Dynamic tile buffer to update.
+        row: Runtime valid row count.
+        col: Runtime valid column count.
+    """
+    row_expr = _scalar_expr(row)
+    col_expr = _scalar_expr(col)
+    tile._valid_shape = (row_expr, col_expr)
+    _op("manual.set_validshape", [row_expr, col_expr], tile)
+
+
 __all__ = [
     # Allocation
     "make_tile",
@@ -853,4 +861,6 @@ __all__ = [
     "gemv", "gemv_acc", "gemv_bias",
     # Layout
     "reshape", "transpose",
+    # Metadata
+    "set_validshape",
 ]

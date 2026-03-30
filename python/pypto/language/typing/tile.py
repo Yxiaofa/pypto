@@ -112,6 +112,7 @@ class Tile(metaclass=TileMeta):
             self.shape = None
             self.dtype = None
             self.memref = None
+            self._valid_shape = None  # (row_expr, col_expr) or None
         else:
             raise ValueError(
                 "Tile must be initialized with either (shape, dtype) for "

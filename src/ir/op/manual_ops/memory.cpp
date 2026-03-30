@@ -58,7 +58,7 @@ static TypePtr DeduceManualOutTileType(const std::vector<ExprPtr>& args,
 // Op registration
 // ---------------------------------------------------------------------------
 
-// manual.load: (tensor, offsets, shapes, out) -> TileType (out's type)
+// manual.load: (tensor, offsets, out) -> TileType (out's type)
 REGISTER_OP("manual.load")
     .set_op_category("ManualOp")
     .set_description(
@@ -66,37 +66,29 @@ REGISTER_OP("manual.load")
         "The output tile (last arg) defines the destination buffer; its type is returned.")
     .add_argument("tensor", "Source tensor (TensorType)")
     .add_argument("offsets", "Offset tuple per dimension (MakeTuple)")
-    .add_argument("shapes", "Size tuple per dimension (MakeTuple, may be empty)")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceManualOutTileType(args, kwargs, "manual.load", 4);
+      return DeduceManualOutTileType(args, kwargs, "manual.load", 3);
     });
 
-// manual.store: (tile, offsets, shapes, output_tensor) -> TensorType
+// manual.store: (tile, offsets, output_tensor) -> TensorType
 REGISTER_OP("manual.store")
     .set_op_category("ManualOp")
     .set_description(
-        "Manual store: copy data from a pre-allocated tile to a global tensor. "
-        "An empty shapes tuple skips set_validshape.")
+        "Manual store: copy data from a pre-allocated tile to a global tensor.")
     .add_argument("tile", "Source tile (TileType)")
     .add_argument("offsets", "Offset tuple per dimension (MakeTuple)")
-    .add_argument("shapes", "Size tuple per dimension (MakeTuple, may be empty)")
     .add_argument("output_tensor", "Destination tensor (TensorType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      CHECK(args.size() == 4) << "manual.store requires 4 arguments, got " << args.size();
+      CHECK(args.size() == 3) << "manual.store requires 3 arguments, got " << args.size();
       CHECK(As<TileType>(args[0]->GetType()))
           << "manual.store: arg 0 must be TileType";
       auto offsets = As<MakeTuple>(args[1]);
       CHECK(offsets) << "manual.store: arg 1 must be MakeTuple (offsets)";
-      auto shapes = As<MakeTuple>(args[2]);
-      CHECK(shapes) << "manual.store: arg 2 must be MakeTuple (shapes)";
-      auto out_type = As<TensorType>(args[3]->GetType());
-      CHECK(out_type) << "manual.store: arg 3 must be TensorType";
-      CHECK(shapes->elements_.empty() ||
-            offsets->elements_.size() == shapes->elements_.size())
-          << "manual.store: offsets/shapes dimension mismatch";
+      auto out_type = As<TensorType>(args[2]->GetType());
+      CHECK(out_type) << "manual.store: arg 2 must be TensorType";
       return out_type;
     });
 
@@ -148,6 +140,20 @@ REGISTER_OP("manual.fillpad")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
       return DeduceManualOutTileType(args, kwargs, "manual.fillpad", 2);
+    });
+
+// manual.set_validshape: (row, col, tile) -> TileType (tile's type)
+REGISTER_OP("manual.set_validshape")
+    .set_op_category("ManualOp")
+    .set_description(
+        "Update valid-shape metadata on a dynamic tile in place. "
+        "Emits a pto.set_validshape instruction to set the runtime valid row/col.")
+    .add_argument("row", "Runtime valid row count (ScalarType or constant)")
+    .add_argument("col", "Runtime valid column count (ScalarType or constant)")
+    .add_argument("tile", "Dynamic tile buffer to update (TileType)")
+    .f_deduce_type([](const std::vector<ExprPtr>& args,
+                      const std::vector<std::pair<std::string, std::any>>& kwargs) {
+      return DeduceManualOutTileType(args, kwargs, "manual.set_validshape", 3);
     });
 
 }  // namespace ir
