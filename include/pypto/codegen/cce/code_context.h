@@ -14,6 +14,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "pypto/ir/expr.h"
 
@@ -133,7 +134,28 @@ class CodeContext {
    */
   void Clear();
 
+  /**
+   * @brief Clear alias map only (for section boundaries)
+   */
+  void ClearAliases();
+
+  /**
+   * @brief Check if a C++ name was auto-registered (cross-section reference)
+   */
+  [[nodiscard]] bool IsAutoRegistered(const std::string& cpp_name) const;
+
+  /**
+   * @brief Save a snapshot of the current state (call after pre-section setup)
+   */
+  void SaveSnapshot();
+
+  /**
+   * @brief Restore the saved snapshot (call at each section entry)
+   */
+  void RestoreSnapshot();
+
  private:
+
   std::unordered_map<std::string, std::string> name_to_cpp_;  ///< Mapping from IR var name to C++ name
   std::unordered_map<std::string, std::string>
       tensor_to_pointer_;  ///< Mapping from tensor var to raw pointer
@@ -141,6 +163,13 @@ class CodeContext {
       tensor_to_struct_pointer_;  ///< Mapping from tensor var to Tensor struct pointer
   std::unordered_map<std::string, std::string>
       alias_map_;  ///< Copy-propagation: cpp_name → canonical target
+  std::unordered_set<std::string>
+      auto_registered_;  ///< Variables auto-registered from cross-section SSA references
+  // Snapshot state (saved after pre-section setup, restored at each section entry)
+  std::unordered_map<std::string, std::string> snap_name_to_cpp_;
+  std::unordered_map<std::string, std::string> snap_ptr_;
+  std::unordered_map<std::string, std::string> snap_struct_;
+  std::unordered_map<std::string, std::string> snap_alias_;
 };
 
 }  // namespace codegen

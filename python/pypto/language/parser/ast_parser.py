@@ -149,6 +149,37 @@ class _StructVar:
         self.name = name
 
 
+class _StructArrayVar:
+    """List/tuple of homogeneous structs supporting dynamic index access.
+
+    Created by assigning a list or tuple of ``_StructVar`` objects that share
+    the same field names::
+
+        ctx_arr = [ctx_0, ctx_1, ctx_2]   # all created via pl.struct(...)
+
+    Dynamic indexing ``ctx_arr[idx]`` produces a ``_DynamicStructView`` which
+    can be used for field reads (``view.field``), field writes
+    (``view.field = val``), or as a function argument.
+    """
+
+    def __init__(self, structs: list[_StructVar], name: str = "") -> None:
+        self.structs = structs
+        self.field_names = list(structs[0].fields.keys())
+        self.name = name  # C++ array variable name
+
+
+class _DynamicStructView:
+    """Runtime view into a ``_StructArrayVar`` at a dynamic IR index.
+
+    Field reads lower to ``struct.get`` IR calls; field writes to ``struct.set``.
+    The CCE codegen translates these to direct C++ array access: ``arr[idx].field``.
+    """
+
+    def __init__(self, array: _StructArrayVar, index_expr: "ir.Expr") -> None:
+        self.array = array
+        self.index_expr = index_expr
+
+
 class ASTParser:
     """Parses Python AST and builds IR using IRBuilder."""
 
@@ -521,6 +552,58 @@ class ASTParser:
                         struct_var = self._parse_struct_call(stmt.value, var_name)
                         self.scope_manager.define_python_var(var_name, struct_var, span=span)
                         return
+                # Check if RHS is a list/tuple of struct variables → _StructArrayVar
+                if isinstance(stmt.value, (ast.List, ast.Tuple)) and len(stmt.value.elts) >= 2:
+                    structs: list[_StructVar] = []
+                    all_structs = True
+                    for elt in stmt.value.elts:
+                        if isinstance(elt, ast.Name):
+                            obj = self.scope_manager.get_python_var(elt.id)
+                            if obj is None:
+                                obj = self.scope_manager.lookup_var(elt.id)
+                            if isinstance(obj, _StructVar):
+                                structs.append(obj)
+                                continue
+                        all_structs = False
+                        break
+                    if all_structs and structs:
+                        # Validate homogeneous field names
+                        ref_fields = set(structs[0].fields.keys())
+                        for i, s in enumerate(structs[1:], 1):
+                            if set(s.fields.keys()) != ref_fields:
+                                raise ParserTypeError(
+                                    f"Struct array element {i} has different fields than element 0",
+                                    span=span,
+                                    hint=f"All structs must have the same fields: {sorted(ref_fields)}",
+                                )
+                        struct_arr = _StructArrayVar(structs, name=var_name)
+                        self.scope_manager.define_python_var(var_name, struct_arr, span=span)
+                        # Emit struct.declare IR call for CCE codegen
+                        fields_csv = ",".join(struct_arr.field_names)
+                        decl_call = ir.create_op_call(
+                            "struct.declare", [],
+                            {"array": var_name, "size": len(structs), "fields": fields_csv},
+                            span,
+                        )
+                        self.builder.emit(ir.EvalStmt(decl_call, span))
+                        return
+                # Check if RHS is a struct array subscript: ctx_curr = ctx_arr[task_id]
+                # Store as a _DynamicStructView alias and emit struct.ref for C++ reference
+                if isinstance(stmt.value, ast.Subscript) and isinstance(stmt.value.value, ast.Name):
+                    arr_obj = self.scope_manager.get_python_var(stmt.value.value.id)
+                    if arr_obj is None:
+                        arr_obj = self.scope_manager.lookup_var(stmt.value.value.id)
+                    if isinstance(arr_obj, _StructArrayVar):
+                        index_expr = self.parse_expression(stmt.value.slice)
+                        view = _DynamicStructView(arr_obj, index_expr)
+                        self.scope_manager.define_python_var(var_name, view, span=span)
+                        # Emit struct.ref for C++ codegen: auto& var = arr[idx];
+                        ref_call = ir.create_op_call(
+                            "struct.ref", [index_expr],
+                            {"array": arr_obj.name, "var": var_name}, span,
+                        )
+                        self.builder.emit(ir.EvalStmt(ref_call, span))
+                        return
                 # Check if this is a yield assignment: var = pl.yield_(...)
                 if isinstance(stmt.value, ast.Call):
                     func = stmt.value.func
@@ -614,6 +697,40 @@ class ASTParser:
                         obj.fields[field_name] = var
                     else:
                         obj.fields[field_name] = value_expr
+                    return
+                # _DynamicStructView field write (view passed as function arg)
+                if isinstance(obj, _DynamicStructView):
+                    if field_name not in obj.array.field_names:
+                        raise ParserTypeError(
+                            f"Struct array view has no field '{field_name}'",
+                            span=span,
+                            hint=f"Available fields: {', '.join(obj.array.field_names)}",
+                        )
+                    value_expr = self.parse_expression(stmt.value)
+                    self._struct_array_field_write(obj.array, obj.index_expr, field_name, value_expr, span)
+                    return
+
+            # Handle struct array field assignment: ctx_arr[idx].field = value
+            if (isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Subscript)
+                    and isinstance(target.value.value, ast.Name)):
+                arr_name = target.value.value.id
+                field_name = target.attr
+                span = self.span_tracker.get_span(stmt)
+
+                arr_obj = self.scope_manager.get_python_var(arr_name)
+                if arr_obj is None:
+                    arr_obj = self.scope_manager.lookup_var(arr_name)
+                if isinstance(arr_obj, _StructArrayVar):
+                    if field_name not in arr_obj.field_names:
+                        raise ParserTypeError(
+                            f"Struct array '{arr_name}' has no field '{field_name}'",
+                            span=span,
+                            hint=f"Available fields: {', '.join(arr_obj.field_names)}",
+                        )
+                    index_expr = self.parse_expression(target.value.slice)
+                    value_expr = self.parse_expression(stmt.value)
+                    self._struct_array_field_write(arr_obj, index_expr, field_name, value_expr, span)
                     return
 
         raise ParserSyntaxError(
@@ -3514,6 +3631,15 @@ class ASTParser:
                         hint=f"Available fields: {', '.join(obj.fields.keys())}",
                     )
                 return obj.fields[field_name]
+            # _DynamicStructView: struct array view passed as function argument
+            if isinstance(obj, _DynamicStructView):
+                if field_name not in obj.array.field_names:
+                    raise ParserTypeError(
+                        f"Struct array view has no field '{field_name}'",
+                        span=span,
+                        hint=f"Available fields: {', '.join(obj.array.field_names)}",
+                    )
+                return self._struct_array_field_read(obj, field_name, span)
             if obj_name in self.tiling_registry:
                 field_vars = self.tiling_registry[obj_name]
                 if field_name in field_vars:
@@ -3545,6 +3671,23 @@ class ASTParser:
                 if inner_obj_name == "pl" and inner_field_name == "MemorySpace":
                     if outer_field_name in _MEMORY_SPACE_MAP:
                         return ir.ConstInt(_MEMORY_SPACE_MAP[outer_field_name].value, DataType.INT64, span)
+        # Check for struct_array[idx].field compound pattern
+        if isinstance(attr.value, ast.Subscript) and isinstance(attr.value.value, ast.Name):
+            arr_name = attr.value.value.id
+            arr_obj = self.scope_manager.get_python_var(arr_name)
+            if arr_obj is None:
+                arr_obj = self.scope_manager.lookup_var(arr_name)
+            if isinstance(arr_obj, _StructArrayVar):
+                field_name = attr.attr
+                if field_name not in arr_obj.field_names:
+                    raise ParserTypeError(
+                        f"Struct array '{arr_name}' has no field '{field_name}'",
+                        span=span,
+                        hint=f"Available fields: {', '.join(arr_obj.field_names)}",
+                    )
+                index_expr = self.parse_expression(attr.value.slice)
+                view = _DynamicStructView(arr_obj, index_expr)
+                return self._struct_array_field_read(view, field_name, span)
         raise UnsupportedFeatureError(
             f"Standalone attribute access not supported: {ast.unparse(attr)}",
             span=span,
@@ -3577,6 +3720,42 @@ class ASTParser:
         span = self.span_tracker.get_span(tuple_node)
         elements = [self.parse_expression(elt) for elt in tuple_node.elts]
         return ir.MakeTuple(elements, span)
+
+    def _struct_array_field_read(
+        self,
+        view: "_DynamicStructView",
+        field_name: str,
+        span: "ir.Span",
+    ) -> ir.Expr:
+        """Read a field from a struct array at a dynamic index.
+
+        Emits ``struct.get(index, array=name, field=field_name)`` IR call.
+        The CCE codegen translates this to ``arr[idx].field``.
+        """
+        return ir.create_op_call(
+            "struct.get", [view.index_expr],
+            {"array": view.array.name, "field": field_name}, span,
+        )
+
+    def _struct_array_field_write(
+        self,
+        arr: "_StructArrayVar",
+        index_expr: ir.Expr,
+        field_name: str,
+        value_expr: ir.Expr,
+        span: "ir.Span",
+    ) -> None:
+        """Write a field to one slot of a struct array at a dynamic index.
+
+        Emits ``struct.set(index, value, array=name, field=field_name)`` as
+        a side-effect statement.  No SSA variable is produced — the C++ array
+        is mutable memory, so no loop-carried iter_arg is needed.
+        """
+        call = ir.create_op_call(
+            "struct.set", [index_expr, value_expr],
+            {"array": arr.name, "field": field_name}, span,
+        )
+        self.builder.emit(ir.EvalStmt(call, span))
 
     def _build_tuple_index_chain(
         self,
@@ -3676,6 +3855,15 @@ class ASTParser:
                         span=span,
                         hint=f"Use tiling.{field_name} directly (no index needed)",
                     )
+
+        # Check for struct array subscript: ctx_arr[idx] → _DynamicStructView
+        if isinstance(subscript.value, ast.Name):
+            _sa_obj = self.scope_manager.get_python_var(subscript.value.id)
+            if _sa_obj is None:
+                _sa_obj = self.scope_manager.lookup_var(subscript.value.id)
+            if isinstance(_sa_obj, _StructArrayVar):
+                index_expr = self.parse_expression(subscript.slice)
+                return _DynamicStructView(_sa_obj, index_expr)
 
         value_expr = self.parse_expression(subscript.value)
 

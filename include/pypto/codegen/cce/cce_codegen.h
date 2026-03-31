@@ -370,6 +370,8 @@ class CCECodegen : public CodegenBase {
 
   // Tile type dedup: maps tile_type_str → alias name already emitted
   std::map<std::string, std::string> emitted_tile_types_;
+
+  bool section_snapshot_saved_ = false;  ///< Whether context snapshot has been saved before first section
 };
 
 }  // namespace codegen

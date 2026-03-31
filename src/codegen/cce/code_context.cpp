@@ -25,8 +25,19 @@ namespace codegen {
 std::string CodeContext::GetVarName(const ir::VarPtr& var) {
   CHECK(var != nullptr) << "Cannot get name for null variable";
   auto it = name_to_cpp_.find(var->name_);
-  CHECK(it != name_to_cpp_.end()) << "Variable " << var->name_ << " not found in context";
-  return it->second;
+  if (it != name_to_cpp_.end()) {
+    return it->second;
+  }
+  // Auto-register: variable may originate from a different section (Cube/Vector)
+  // that was cleared on section boundary. Use the sanitized IR name.
+  std::string cpp_name = SanitizeName(var);
+  name_to_cpp_[var->name_] = cpp_name;
+  auto_registered_.insert(cpp_name);
+  return cpp_name;
+}
+
+bool CodeContext::IsAutoRegistered(const std::string& cpp_name) const {
+  return auto_registered_.count(cpp_name) > 0;
 }
 
 void CodeContext::RegisterVar(const ir::VarPtr& var, const std::string& cpp_name) {
@@ -143,6 +154,26 @@ std::string CodeContext::SanitizeName(const ir::VarPtr& var) const {
 
   return result;
 }
+
+void CodeContext::ClearAliases() {
+  alias_map_.clear();
+}
+
+void CodeContext::SaveSnapshot() {
+  snap_name_to_cpp_ = name_to_cpp_;
+  snap_ptr_ = tensor_to_pointer_;
+  snap_struct_ = tensor_to_struct_pointer_;
+  snap_alias_ = alias_map_;
+}
+
+void CodeContext::RestoreSnapshot() {
+  name_to_cpp_ = snap_name_to_cpp_;
+  tensor_to_pointer_ = snap_ptr_;
+  tensor_to_struct_pointer_ = snap_struct_;
+  alias_map_ = snap_alias_;
+  auto_registered_.clear();
+}
+
 
 }  // namespace codegen
 

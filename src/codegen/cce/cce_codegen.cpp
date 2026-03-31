@@ -214,6 +214,7 @@ std::string CCECodegen::GenerateSingle(const ir::ProgramPtr& program, const std:
 
   // Generate prologue and body
   GenerateSinglePrologue(kernel_func, needs_ffts);
+  section_snapshot_saved_ = false;
   GenerateBody(kernel_func);
 
   single_file_mode_ = false;
@@ -618,6 +619,20 @@ void CCECodegen::VisitStmt_(const ir::SectionStmtPtr& op) {
       emitter_.EmitLine("#if defined(__DAV_VEC__)");
     }
   }
+
+  // Reset to pre-section state (Cube and Vector are compiled separately via #if guards).
+  // Snapshot is saved on first section entry; restored on subsequent sections.
+  if (!section_snapshot_saved_) {
+    context_.SaveSnapshot();
+    section_snapshot_saved_ = true;
+  } else {
+    context_.RestoreSnapshot();
+  }
+  event_id_decls_.clear();
+  tile_array_decls_.clear();
+  tile_array_counter_ = 0;
+  // Note: keep tile_addresses_ and emitted_tile_types_ — they contain prologue data
+  // needed across all sections (tile TASSIGN addresses, type aliases).
 
   // Visit the body
   if (op->body_) {
@@ -1402,6 +1417,11 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
                                 !std::dynamic_pointer_cast<const ir::TensorType>(init_var->GetType()) &&
                                 !std::dynamic_pointer_cast<const ir::TileType>(init_var->GetType()) &&
                                 !std::dynamic_pointer_cast<const ir::TupleType>(init_var->GetType());
+      // In single-file mode, skip copy propagation if init is a cross-section variable
+      // (auto-registered after snapshot restore) to avoid aliasing to undeclared names.
+      if (is_simple_var_copy && single_file_mode_ && context_.IsAutoRegistered(resolved_init)) {
+        is_simple_var_copy = false;
+      }
 
       if (is_simple_var_copy) {
         // Alias: iter_arg_name → resolved init var.  No code emitted.
@@ -1413,7 +1433,12 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
         if (!any_emitted) {
           any_emitted = true;
         }
-        emitter_.EmitLine("auto " + iter_arg_name + " = " + init_value + ";");
+        // If init references a cross-section variable, substitute with 0
+        std::string safe_init = init_value;
+        if (single_file_mode_ && context_.IsAutoRegistered(init_value)) {
+          safe_init = "0";
+        }
+        emitter_.EmitLine("auto " + iter_arg_name + " = " + safe_init + ";");
       }
     }
     if (any_emitted) {
@@ -1446,7 +1471,7 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
       for (size_t i = 0; i < op->return_vars_.size(); ++i) {
         const auto& return_var = op->return_vars_[i];
         if (i < iter_arg_names.size()) {
-          context_.RegisterVar(return_var, iter_arg_names[i]);
+          context_.RegisterVar(return_var, context_.ResolveAlias(iter_arg_names[i]));
         } else {
           throw pypto::RuntimeError("ForStmt return_var has no corresponding iter_arg");
         }
@@ -1521,10 +1546,8 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
 
     emitter_.EmitRaw(for_code);
 
-    // Clear per-loop deduplication caches
-    event_id_decls_.clear();
-    tile_array_decls_.clear();
-    tile_array_counter_ = 0;
+    // Note: keep event_id_decls_ and tile_array_decls_ alive so epilogue
+    // code (after the loop) can reuse the same declarations without redefinition.
   }
 
   // Register return variables with same names as iter_args
@@ -1532,7 +1555,7 @@ void CCECodegen::VisitStmt_(const ir::ForStmtPtr& op) {
     for (size_t i = 0; i < op->return_vars_.size(); ++i) {
       const auto& return_var = op->return_vars_[i];
       if (i < iter_arg_names.size()) {
-        context_.RegisterVar(return_var, iter_arg_names[i]);
+        context_.RegisterVar(return_var, context_.ResolveAlias(iter_arg_names[i]));
       } else {
         throw pypto::RuntimeError("ForStmt return_var has no corresponding iter_arg");
       }

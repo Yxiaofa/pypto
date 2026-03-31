@@ -786,5 +786,75 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "manual.transpose")
       return MakeManualTransposeCodegenCCE(op, codegen);
     });
 
+// ============================================================================
+// Op registrations — Struct array (C++ struct + array for pl.struct lists)
+// ============================================================================
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "struct.declare")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+      std::string arr_name = op->GetKwarg<std::string>("array");
+      int size = op->GetKwarg<int>("size");
+      std::string fields_csv = op->GetKwarg<std::string>("fields");
+
+      // Parse comma-separated field names
+      std::vector<std::string> field_names;
+      std::istringstream iss(fields_csv);
+      std::string token;
+      while (std::getline(iss, token, ',')) {
+        if (!token.empty()) field_names.push_back(token);
+      }
+
+      // Emit C++ struct definition
+      std::string type_name = arr_name + "_t";
+      std::string struct_def = "struct " + type_name + " { ";
+      for (const auto& f : field_names) {
+        struct_def += "int64_t " + f + "; ";
+      }
+      struct_def += "};";
+      codegen.Emit(struct_def);
+
+      // Emit array declaration (zero-initialized)
+      codegen.Emit(type_name + " " + arr_name + "[" + std::to_string(size) + "] = {};");
+      return std::string("");
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "struct.get")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+      CHECK(op->args_.size() == 1) << "struct.get requires 1 arg (index)";
+      std::string idx = codegen.GetExprAsCode(op->args_[0]);
+      std::string arr_name = op->GetKwarg<std::string>("array");
+      std::string field = op->GetKwarg<std::string>("field");
+      return arr_name + "[" + idx + "]." + field;
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "struct.set")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+      CHECK(op->args_.size() == 2) << "struct.set requires 2 args (index, value)";
+      std::string idx = codegen.GetExprAsCode(op->args_[0]);
+      std::string val = codegen.GetExprAsCode(op->args_[1]);
+      std::string arr_name = op->GetKwarg<std::string>("array");
+      std::string field = op->GetKwarg<std::string>("field");
+      codegen.Emit(arr_name + "[" + idx + "]." + field + " = " + val + ";");
+      return std::string("");
+    });
+
+REGISTER_BACKEND_OP(Backend910B_CCE, "struct.ref")
+    .set_pipe(ir::PipeType::V)
+    .f_codegen([](const ir::CallPtr& op, codegen::CodegenBase& codegen_base) {
+      auto& codegen = dynamic_cast<codegen::CCECodegen&>(codegen_base);
+      CHECK(op->args_.size() == 1) << "struct.ref requires 1 arg (index)";
+      std::string idx = codegen.GetExprAsCode(op->args_[0]);
+      std::string arr_name = op->GetKwarg<std::string>("array");
+      std::string var_name = op->GetKwarg<std::string>("var");
+      codegen.Emit("auto& " + var_name + " = " + arr_name + "[" + idx + "];");
+      return std::string("");
+    });
+
 }  // namespace backend
 }  // namespace pypto

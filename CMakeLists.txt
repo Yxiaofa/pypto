@@ -106,6 +106,7 @@ set(PYPTO_SOURCES
     src/ir/op/manual_ops/matmul.cpp
     src/ir/op/manual_ops/memory.cpp
     src/ir/op/manual_ops/reduction.cpp
+    src/ir/op/manual_ops/struct_ops.cpp
     src/ir/op/sync_ops/sync.cpp
     src/ir/op/tensor_ops/elementwise.cpp
     src/ir/op/tensor_ops/matmul.cpp
