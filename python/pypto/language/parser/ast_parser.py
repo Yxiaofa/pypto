@@ -175,9 +175,10 @@ class _DynamicStructView:
     The CCE codegen translates these to direct C++ array access: ``arr[idx].field``.
     """
 
-    def __init__(self, array: _StructArrayVar, index_expr: "ir.Expr") -> None:
+    def __init__(self, array: _StructArrayVar, index_expr: "ir.Expr", ref_name: str = "") -> None:
         self.array = array
         self.index_expr = index_expr
+        self.ref_name = ref_name  # C++ reference variable name (empty = no ref)
 
 
 class ASTParser:
@@ -237,6 +238,8 @@ class ASTParser:
         # Inline function expansion state
         self._inline_mode = False
         self._inline_return_expr: ir.Expr | None = None
+        self._inline_prefix: str = ""  # unique prefix per inline expansion
+        self._inline_counter: int = 0  # monotonic counter for unique prefixes
 
         # Cache for implicitly compiled functions (keyed by id(fn))
         self._implicit_func_cache: dict[int, Any] = {}
@@ -649,7 +652,7 @@ class ASTParser:
                         arr_obj = self.scope_manager.lookup_var(stmt.value.value.id)
                     if isinstance(arr_obj, _StructArrayVar):
                         index_expr = self.parse_expression(stmt.value.slice)
-                        view = _DynamicStructView(arr_obj, index_expr)
+                        view = _DynamicStructView(arr_obj, index_expr, ref_name=var_name)
                         self.scope_manager.define_python_var(var_name, view, span=span)
                         # Emit struct.ref for C++ codegen: auto& var = arr[idx];
                         ref_call = ir.create_op_call(
@@ -698,7 +701,8 @@ class ASTParser:
                         span=span,
                         hint="Inline functions used as expressions must return a value",
                     )
-                var = self.builder.let(var_name, value_expr, span=span)
+                ir_var_name = self._inline_prefix + var_name if self._inline_prefix else var_name
+                var = self.builder.let(ir_var_name, value_expr, span=span)
                 self.scope_manager.define_var(var_name, var, span=span)
 
                 # Auto-sync: register tile region for overlap detection
@@ -769,7 +773,7 @@ class ASTParser:
                             hint=f"Available fields: {', '.join(obj.array.field_names)}",
                         )
                     value_expr = self.parse_expression(stmt.value)
-                    self._struct_array_field_write(obj.array, obj.index_expr, field_name, value_expr, span)
+                    self._struct_array_field_write(obj.array, obj.index_expr, field_name, value_expr, span, ref_name=obj.ref_name)
                     return
 
             # Handle struct array field assignment: ctx_arr[idx].field = value
@@ -2321,9 +2325,11 @@ class ASTParser:
             self.scope_manager.define_var(param_name, arg_expr, allow_redef=True)
 
         # Save parser state and switch to the inline function's context
-        prev_inline_state = (self._inline_mode, self._inline_return_expr)
+        prev_inline_state = (self._inline_mode, self._inline_return_expr, self._inline_prefix)
         self._inline_mode = True
         self._inline_return_expr = None
+        self._inline_prefix = f"_il{self._inline_counter}_"
+        self._inline_counter += 1
 
         prev_closure_vars = self.expr_evaluator.closure_vars
         self.expr_evaluator.closure_vars = {**inline_func.closure_vars, **prev_closure_vars}
@@ -2354,7 +2360,7 @@ class ASTParser:
             ) = prev_span_state
             self.expr_evaluator.closure_vars = prev_closure_vars
             return_expr = self._inline_return_expr
-            self._inline_mode, self._inline_return_expr = prev_inline_state
+            self._inline_mode, self._inline_return_expr, self._inline_prefix = prev_inline_state
             # Leak vars so inlined definitions are visible to the caller
             self.scope_manager.exit_scope(leak_vars=True)
 
@@ -3819,13 +3825,13 @@ class ASTParser:
     ) -> ir.Expr:
         """Read a field from a struct array at a dynamic index.
 
-        Emits ``struct.get(index, array=name, field=field_name)`` IR call.
-        The CCE codegen translates this to ``arr[idx].field``.
+        If the view has a ref_name (from ``ctx = ctx_arr[idx]``), the codegen
+        uses the C++ reference (``ctx.field``) instead of ``ctx_arr[idx].field``.
         """
-        return ir.create_op_call(
-            "struct.get", [view.index_expr],
-            {"array": view.array.name, "field": field_name}, span,
-        )
+        kwargs: dict[str, Any] = {"array": view.array.name, "field": field_name}
+        if view.ref_name:
+            kwargs["ref"] = view.ref_name
+        return ir.create_op_call("struct.get", [view.index_expr], kwargs, span)
 
     def _struct_array_field_write(
         self,
@@ -3834,17 +3840,17 @@ class ASTParser:
         field_name: str,
         value_expr: ir.Expr,
         span: "ir.Span",
+        ref_name: str = "",
     ) -> None:
         """Write a field to one slot of a struct array at a dynamic index.
 
-        Emits ``struct.set(index, value, array=name, field=field_name)`` as
-        a side-effect statement.  No SSA variable is produced — the C++ array
-        is mutable memory, so no loop-carried iter_arg is needed.
+        If ref_name is set, the codegen uses the C++ reference (``ctx.field = val``)
+        instead of ``ctx_arr[idx].field = val``.
         """
-        call = ir.create_op_call(
-            "struct.set", [index_expr, value_expr],
-            {"array": arr.name, "field": field_name}, span,
-        )
+        kwargs: dict[str, Any] = {"array": arr.name, "field": field_name}
+        if ref_name:
+            kwargs["ref"] = ref_name
+        call = ir.create_op_call("struct.set", [index_expr, value_expr], kwargs, span)
         self.builder.emit(ir.EvalStmt(call, span))
 
     def _build_tuple_index_chain(

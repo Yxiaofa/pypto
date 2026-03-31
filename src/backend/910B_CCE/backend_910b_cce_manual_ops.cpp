@@ -817,6 +817,11 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "struct.get")
       CHECK(op->args_.size() == 1) << "struct.get requires 1 arg (index)";
       std::string arr_name = op->GetKwarg<std::string>("array");
       std::string field = op->GetKwarg<std::string>("field");
+      std::string ref = op->GetKwarg<std::string>("ref");
+      // If a C++ reference exists, use it: "ref.field"
+      if (!ref.empty()) {
+        return ref + "." + field;
+      }
       // For constant-0 index (single struct), emit "name.field" instead of "name[0].field"
       auto cint = ir::As<ir::ConstInt>(op->args_[0]);
       if (cint && cint->value_ == 0) {
@@ -834,6 +839,12 @@ REGISTER_BACKEND_OP(Backend910B_CCE, "struct.set")
       std::string val = codegen.GetExprAsCode(op->args_[1]);
       std::string arr_name = op->GetKwarg<std::string>("array");
       std::string field = op->GetKwarg<std::string>("field");
+      std::string ref = op->GetKwarg<std::string>("ref");
+      // If a C++ reference exists, use it: "ref.field = val;"
+      if (!ref.empty()) {
+        codegen.Emit(ref + "." + field + " = " + val + ";");
+        return std::string("");
+      }
       // For constant-0 index (single struct), emit "name.field = val;"
       auto cint = ir::As<ir::ConstInt>(op->args_[0]);
       if (cint && cint->value_ == 0) {

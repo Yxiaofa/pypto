@@ -416,13 +416,14 @@ def fa_perf_tkv_preload_kernel(
 
             # ---- Main loop: P[ki+preload] ahead + GU[ki] current ----
             for ki in pl.range(0, skv_tiles):
-                ctx_arr[task_id % 3].sq_off = sq_off
-                ctx_arr[task_id % 3].task_id = task_id
-                ctx_arr[task_id % 3].qi = qi
-                ctx_arr[task_id % 3].ki = ki
-                ctx_arr[task_id % 3].skv_tiles = skv_tiles
-                ctx_arr[task_id % 3].q_count = q_count
-                ctx_arr[task_id % 3].core_id = core_id
+                ctx_curr = ctx_arr[task_id % 3]
+                ctx_curr.sq_off = sq_off
+                ctx_curr.task_id = task_id
+                ctx_curr.qi = qi
+                ctx_curr.ki = ki
+                ctx_curr.skv_tiles = skv_tiles
+                ctx_curr.q_count = q_count
+                ctx_curr.core_id = core_id
                 if task_id > 0:
                     compute_p(ctx_arr[(task_id + 2) % 3], sq_dim, row_off)
                 if task_id > 1:
