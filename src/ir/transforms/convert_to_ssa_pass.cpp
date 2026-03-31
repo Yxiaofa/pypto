@@ -110,9 +110,6 @@ class SSAConverter : public IRMutator {
  public:
   SSAConverter() = default;
 
-  /** @brief Get version counter (call after Convert) */
-  const std::unordered_map<std::string, int>& GetVersionCounter() const { return version_counter_; }
-
   /**
    * @brief Convert a function to SSA form
    */
@@ -764,85 +761,6 @@ class SSAConverter : public IRMutator {
   }
 };
 
-/**
- * @brief Simplify SSA names by removing "_0" suffix for single-version variables
- *
- * After SSA conversion, variables that were never reassigned end up as "name_0".
- * This pass renames them back to "name" for cleaner generated code.
- * Relies on base IRMutator to propagate through all statement/expression types.
- */
-class SSASuffixSimplifier : public IRMutator {
- public:
-  explicit SSASuffixSimplifier(std::set<std::string> single_version_names)
-      : single_version_names_(std::move(single_version_names)) {}
-
-  FunctionPtr Simplify(const FunctionPtr& func) {
-    // Rename parameters
-    std::vector<VarPtr> new_params;
-    for (const auto& p : func->params_) {
-      auto new_p_expr = VisitExpr(p);
-      new_params.push_back(As<Var>(new_p_expr));
-    }
-    // Rename body (base IRMutator handles all stmt/expr types)
-    StmtPtr new_body = func->body_ ? VisitStmt(func->body_) : nullptr;
-    return std::make_shared<Function>(func->name_, new_params, func->param_directions_,
-                                      func->return_types_, new_body, func->span_, func->func_type_);
-  }
-
- protected:
-  ExprPtr VisitExpr_(const VarPtr& op) override {
-    std::string new_name = StripSuffix(op->name_);
-    if (new_name != op->name_) {
-      auto new_type = RenameTypeVars(op->GetType());
-      return std::make_shared<Var>(new_name, new_type, op->span_);
-    }
-    return op;
-  }
-
-  ExprPtr VisitExpr_(const IterArgPtr& op) override {
-    auto new_init = VisitExpr(op->initValue_);
-    std::string new_name = StripSuffix(op->name_);
-    if (new_name != op->name_ || new_init != op->initValue_) {
-      auto new_type = RenameTypeVars(op->GetType());
-      return std::make_shared<IterArg>(new_name, new_type, new_init, op->span_);
-    }
-    return op;
-  }
-
- private:
-  std::set<std::string> single_version_names_;
-
-  std::string StripSuffix(const std::string& name) const {
-    if (name.size() >= 3 && name.substr(name.size() - 2) == "_0") {
-      std::string base = name.substr(0, name.size() - 2);
-      if (single_version_names_.count(base) > 0) {
-        return base;
-      }
-    }
-    return name;
-  }
-
-  TypePtr RenameTypeVars(const TypePtr& type) {
-    if (auto tile_type = As<TileType>(type)) {
-      if (!tile_type->tile_view_.has_value()) return type;
-      const auto& tv = tile_type->tile_view_.value();
-      if (tv.valid_shape.empty()) return type;
-      std::vector<ExprPtr> new_valid_shape;
-      bool changed = false;
-      for (const auto& vs : tv.valid_shape) {
-        auto new_vs = VisitExpr(vs);
-        if (new_vs != vs) changed = true;
-        new_valid_shape.push_back(new_vs);
-      }
-      if (!changed) return type;
-      TileView new_tile_view = tv;
-      new_tile_view.valid_shape = std::move(new_valid_shape);
-      return std::make_shared<TileType>(tile_type->shape_, tile_type->dtype_, tile_type->memref_,
-                                        std::make_optional(std::move(new_tile_view)));
-    }
-    return type;
-  }
-};
 
 /**
  * @brief Transform function: Convert a function to SSA form
@@ -851,19 +769,6 @@ FunctionPtr TransformConvertToSSA(const FunctionPtr& func) {
   INTERNAL_CHECK(func) << "ConvertToSSA cannot run on null function";
   SSAConverter converter;
   auto ssa_func = converter.Convert(func);
-
-  // Simplify: strip "_0" suffix from single-version variables
-  const auto& vc = converter.GetVersionCounter();
-  std::set<std::string> single_version;
-  for (const auto& [base_name, count] : vc) {
-    if (count == 1) {
-      single_version.insert(base_name);
-    }
-  }
-  if (!single_version.empty()) {
-    SSASuffixSimplifier simplifier(std::move(single_version));
-    ssa_func = simplifier.Simplify(ssa_func);
-  }
 
   return ssa_func;
 }
