@@ -24,11 +24,10 @@ from pypto.pypto_core.ir import Call, Expr, Span, ConstInt
 from ..utils import _get_span_or_capture, _normalize_expr, _to_make_tuple
 
 
-def load_(
+def load(
     out: Expr,
     tensor: Expr,
     offsets: Sequence[int | Expr] | _ir_core.MakeTuple,
-    shapes: Sequence[int | Expr] | _ir_core.MakeTuple | None = None,
     span: Span | None = None,
     layout: str | None = None,
 ) -> Call:
@@ -37,8 +36,7 @@ def load_(
     Args:
         out: Pre-allocated destination tile.
         tensor: Source tensor expression.
-        offsets: Offsets tuple or sequence.
-        shapes: Shape tuple or sequence. If None, inferred from out.type.shape.
+        offsets: Offsets tuple or sequence (absolute offsets).
         span: Optional source span.
         layout: Tensor memory layout, "ND" (row-major) or "DN" (column-major).
 
@@ -47,20 +45,14 @@ def load_(
     """
     actual_span = _get_span_or_capture(span)
     offsets_tuple = _to_make_tuple(offsets, actual_span)
-    if shapes is None:
-        tile_shape = out.type.shape
-        shapes_tuple = _ir_core.MakeTuple(list(tile_shape), actual_span)
-    else:
-        shapes_tuple = _to_make_tuple(shapes, actual_span)
+    tile_shape = out.type.shape
+    shapes_tuple = _ir_core.MakeTuple(list(tile_shape), actual_span)
     kwargs: dict = {}
     if layout is not None:
         kwargs["layout"] = layout
     return _ir_core.create_op_call(
         "manual.load", [tensor, offsets_tuple, shapes_tuple, out], kwargs, actual_span
     )
-
-
-load = load_
 
 
 def move(
@@ -153,6 +145,7 @@ def load_tile(
     tile_offsets: _ir_core.MakeTuple,
     span: Span | None = None,
     layout: str | None = None,
+    tile_dims: list[int] | None = None,
 ) -> Call:
     """Build manual.load with abs_offsets = tile_offsets * shapes for last dims.
 
@@ -167,6 +160,9 @@ def load_tile(
             last M are tile-relative offsets.
         span: Optional source span.
         layout: Optional layout string ("dn" for column-major).
+        tile_dims: Optional list of dimension indices that tile corresponds to.
+            If None, defaults to last M dimensions (BNSD layout).
+            For BSND layout [B, S, N, D] with tile [TS, TD], use tile_dims=[1, 3].
 
     Returns:
         Call expression for manual.load with absolute offsets.
@@ -177,23 +173,28 @@ def load_tile(
     tensor_ndim = len(tensor_type.shape)
     tile_ndim = len(tile_shape)
 
+    if tile_dims is None:
+        tile_dims = list(range(tensor_ndim - tile_ndim, tensor_ndim))
+
     offsets = []
     for i, tile_offset in enumerate(tile_offsets.elements):
-        if i < tensor_ndim - tile_ndim:
-            offsets.append(tile_offset)
-        else:
-            tile_idx = i - (tensor_ndim - tile_ndim)
+        if i in tile_dims:
+            tile_idx = tile_dims.index(i)
             shape = tile_shape[tile_idx]
             if isinstance(tile_offset, ConstInt) and isinstance(shape, ConstInt):
                 offset = ConstInt(tile_offset.value * shape.value, DataType.INT64, actual_span)
             else:
                 offset = _ir_core.Mul(tile_offset, shape, DataType.INT64, actual_span)
             offsets.append(offset)
+        else:
+            offsets.append(tile_offset)
     offsets_tuple = _ir_core.MakeTuple(offsets, actual_span)
     shapes_tuple = _ir_core.MakeTuple(list(tile_shape), actual_span)
     kwargs = {}
     if layout is not None:
         kwargs["layout"] = layout
+    if tile_dims != list(range(tensor_ndim - tile_ndim, tensor_ndim)):
+        kwargs["tile_dims"] = ",".join(str(d) for d in tile_dims)
     return _ir_core.create_op_call(
         "manual.load", [tensor, offsets_tuple, shapes_tuple, out], kwargs, actual_span
     )
@@ -204,6 +205,7 @@ def store_tile(
     tile: Expr,
     tile_offsets: _ir_core.MakeTuple,
     span: Span | None = None,
+    tile_dims: list[int] | None = None,
 ) -> Call:
     """Build manual.store with abs_offsets = tile_offsets * shapes for last dims.
 
@@ -218,6 +220,9 @@ def store_tile(
             last M are tile-relative offsets.
         valid_shapes: MakeTuple of tile shapes (used for offset computation only).
         span: Optional source span.
+        tile_dims: Optional list of dimension indices that tile corresponds to.
+            If None, defaults to last M dimensions (BNSD layout).
+            For BSND layout [B, S, N, D] with tile [TS, TD], use tile_dims=[1, 3].
 
     Returns:
         Call expression for manual.store with absolute offsets.
@@ -228,20 +233,26 @@ def store_tile(
     tensor_ndim = len(tensor_type.shape)
     tile_ndim = len(tile_shape)
 
+    if tile_dims is None:
+        tile_dims = list(range(tensor_ndim - tile_ndim, tensor_ndim))
+
     offsets = []
     for i, tile_offset in enumerate(tile_offsets.elements):
-        if i < tensor_ndim - tile_ndim:
-            offsets.append(tile_offset)
-        else:
-            tile_idx = i - (tensor_ndim - tile_ndim)
+        if i in tile_dims:
+            tile_idx = tile_dims.index(i)
             shape = tile_shape[tile_idx]
             if isinstance(tile_offset, ConstInt) and isinstance(shape, ConstInt):
                 offset = ConstInt(tile_offset.value * shape.value, DataType.INT64, actual_span)
             else:
                 offset = _ir_core.Mul(tile_offset, shape, DataType.INT64, actual_span)
             offsets.append(offset)
+        else:
+            offsets.append(tile_offset)
     offsets_tuple = _ir_core.MakeTuple(offsets, actual_span)
 
+    kwargs = {}
+    if tile_dims != list(range(tensor_ndim - tile_ndim, tensor_ndim)):
+        kwargs["tile_dims"] = ",".join(str(d) for d in tile_dims)
     return _ir_core.create_op_call(
-        "manual.store", [tile, offsets_tuple, out], {}, actual_span
+        "manual.store", [tile, offsets_tuple, out], kwargs, actual_span
     )

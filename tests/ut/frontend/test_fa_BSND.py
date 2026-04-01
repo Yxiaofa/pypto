@@ -1,4 +1,4 @@
-"""FlashAttention kernel using PyPTO IR manual (non-SSA) mode - BN axis version.
+"""FlashAttention kernel using PyPTO IR manual (non-SSA) mode - BS axis version.
 
 Multi-core with Q tiling loop + double buffer for K loads in Cube section.
 K loaded with DN layout (TLOAD transposes on-chip), TILE_SQ=128, TILE_SKV=128, TILE_D=128.
@@ -7,13 +7,21 @@ Features:
   1. Multi-core: each core processes multiple Q tiles via strided loop
   2. Double buffer: k_mat ping/pong in MAT space for overlapping K loads with computation
   3. Backward sync: bar_all() at Q iteration boundary to ensure buffer reuse safety
-  4. BN axis support: 4D tensors [B, N, Sq, D] with offsets [b_idx, n_idx, sq_off, d_off]
+  4. BS axis support: 4D tensors [B, Sq, N, D] with offsets [b_idx, sq_off, n_idx, d_off]
+  5. S-dimension stride: N*D (S jumps across N heads, each with D elements)
+  6. Loop order: batch -> head (n_idx) -> Q tiles (qi) -> KV tiles (j)
 
 Tensor shapes:
-  - Q/K/V/O: [B, N, Sq, D], qk_buf: [B, N, Sq, Skv], p_buf: [B, N, Sq, Skv]
+  - Q/K/V/O: [B, Sq, N, D], qk_buf: [B, Sq, N, Skv], p_buf: [B, Sq, N, Skv]
+  
+Layout explanation:
+  - BSND: [Batch, SeqLen, NumHeads, HeadDim]
+  - Stride: S-stride = N*D, N-stride = D, D-stride = 1
+  - In BSND layout, different heads are at dimension 2 (N), accessed via n_idx
+  - Sequence length (S) is at dimension 1, accessed via qi (for Q) or j (for K/V)
 
 Usage:
-    python3 tests/ut/frontend/test_fa_bn.py
+    python3 tests/ut/frontend/test_fa_bsnd.py
 """
 
 import math
@@ -24,8 +32,6 @@ import pypto.language as pl
 import pypto.language.op.manual as plm
 
 TS = 128
-
-
 TKV = 128
 TD = 128
 TS_HALF = TS // 2
@@ -87,17 +93,17 @@ NumRanges = pl.DynVar('NumRanges')
 
 
 @fe.kernel
-def fa_k_kernel_bn(
-    q: pl.Tensor[[B, N, Sq2, D2], pl.FP16],
-    k: pl.Tensor[[B, N, Skv2, D2], pl.FP16],
-    v: pl.Tensor[[B, N, Skv2, D2], pl.FP16],
-    o: pl.Tensor[[B, N, Sq2, D2], pl.FP16],
-    qk_buf: pl.Tensor[[B, N, Sq2, Skv2], pl.FP32],
-    p_buf: pl.Tensor[[B, N, Sq2, Skv2], pl.FP16],
+def fa_k_kernel_bs(
+    q: pl.Tensor[[B, Sq2, N, D2], pl.FP16],
+    k: pl.Tensor[[B, Skv2, N, D2], pl.FP16],
+    v: pl.Tensor[[B, Skv2, N, D2], pl.FP16],
+    o: pl.Tensor[[B, Sq2, N, D2], pl.FP16],
+    qk_buf: pl.Tensor[[B, Sq2, N, Skv2], pl.FP32],
+    p_buf: pl.Tensor[[B, Sq2, N, Skv2], pl.FP16],
     pv_buf: pl.Tensor[[48 * TS, D2], pl.FP32],
     b_ranges: pl.Tensor[[NumRanges, 2], pl.INT32],
     n_ranges: pl.Tensor[[NumRanges, 2], pl.INT32],
-) -> pl.Tensor[[B, N, Sq2, D2], pl.FP16]:
+) -> pl.Tensor[[B, Sq2, N, D2], pl.FP16]:
     with pl.section_cube():
         sq_dim = Sq2
         skv_dim = Skv2
@@ -159,7 +165,7 @@ def fa_k_kernel_bn(
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=0)
                     sq_off = qi * TS
                     q_mat_idx = q_count % 2
-                    plm.load_tile(q_mat_buf[q_mat_idx], q, [b_idx, n_idx, qi, 0])
+                    plm.load_tile(q_mat_buf[q_mat_idx], q, [b_idx, qi, n_idx, 0], tile_dims=[1, 3])
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
@@ -173,7 +179,7 @@ def fa_k_kernel_bn(
                             pl.system.sync_src(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=0)
 
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=2)
-                        plm.load_tile(k_mat_buf[buf_idx], k, [b_idx, n_idx, j, 0], layout="dn")
+                        plm.load_tile(k_mat_buf[buf_idx], k, [b_idx, j, n_idx, 0], layout="dn", tile_dims=[1, 3])
                         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=1)
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=1)
 
@@ -191,20 +197,20 @@ def fa_k_kernel_bn(
                         pl.system.sync_src(set_pipe=pl.PipeType.M, wait_pipe=pl.PipeType.MTE1, event_id=1)
                         right_index = 1 - right_index
                         left_index = 1 - left_index
-                        plm.store_tile(qk_buf, acc_buf[buf_idx], [b_idx, n_idx, qi, j])
+                        plm.store_tile(qk_buf, acc_buf[buf_idx], [b_idx, qi, n_idx, j], tile_dims=[1, 3])
                         pl.system.sync_src(set_pipe=pl.PipeType.FIX, wait_pipe=pl.PipeType.M, event_id=0)
 
                         pl.system.set_cross_core(pipe=pl.PipeType.FIX, event_id=QK_READY)
-                        pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=P_READY)
+                        pl.system.wait_cross_core(pipe=pl.PipeType.M, event_id=P_READY)
 
                         buf_idx_pv = (q_count * skv_tiles + j) % 2
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=1)
-                        plm.load_tile(p_mat_buf[buf_idx], p_buf, [b_idx, n_idx, qi, j])
+                        plm.load_tile(p_mat_buf[buf_idx], p_buf, [b_idx, qi, n_idx, j], tile_dims=[1, 3])
                         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=0)
 
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE1, wait_pipe=pl.PipeType.MTE2, event_id=3)
-                        plm.load_tile(v_mat_buf[buf_idx], v, [b_idx, n_idx, j, 0])
+                        plm.load_tile(v_mat_buf[buf_idx], v, [b_idx, j, n_idx, 0], tile_dims=[1, 3])
                         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=1)
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.MTE1, event_id=1)
 
@@ -275,8 +281,8 @@ def fa_k_kernel_bn(
                 for qi in pl.range(0, sq_tiles):
                     sq_off = qi * TS
                     q_mat_idx = q_count % 2
-                    pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=QK_READY)
-                    plm.load_tile(qk_vec, qk_buf, [b_idx, n_idx, qi * 2 + sub_id, 0])
+                    pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=QK_READY)
+                    plm.load_tile(qk_vec, qk_buf, [b_idx, qi * 2 + sub_id, n_idx, 0], tile_dims=[1, 3])
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                     plm.row_max(reduce_dst, qk_vec, tmp_vec)
@@ -292,18 +298,18 @@ def fa_k_kernel_bn(
                     plm.cast(p_f16, qk_vec, target_type=pl.FP16, mode="round")
                     pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
-                    plm.store_tile(p_buf, p_f16, [b_idx, n_idx, qi * 2 + sub_id, 0])
+                    plm.store_tile(p_buf, p_f16, [b_idx, qi * 2 + sub_id, n_idx, 0], tile_dims=[1, 3])
                     pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=P_READY)
 
-                    pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=PV_READY)
+                    pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=PV_READY)
                     plm.load_tile(running_o, pv_buf, [core_id * 4 + q_mat_idx * 2 + sub_id, 0])
                     pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
                     for j in pl.range(1, skv_tiles):
                         skv_off = j * TKV
-                        pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=QK_READY)
-                        plm.load_tile(qk_vec, qk_buf, [b_idx, n_idx, qi * 2 + sub_id, j])
+                        pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=QK_READY)
+                        plm.load_tile(qk_vec, qk_buf, [b_idx, qi * 2 + sub_id, n_idx, j], tile_dims=[1, 3])
                         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
 
@@ -329,10 +335,10 @@ def fa_k_kernel_bn(
 
                         pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
                         pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
-                        plm.store_tile(p_buf, p_f16, [b_idx, n_idx, qi * 2 + sub_id, j])
+                        plm.store_tile(p_buf, p_f16, [b_idx, qi * 2 + sub_id, n_idx, j], tile_dims=[1, 3])
                         pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=P_READY)
 
-                        pl.system.wait_cross_core(pipe=pl.PipeType.MTE2, event_id=PV_READY)
+                        pl.system.wait_cross_core(pipe=pl.PipeType.V, event_id=PV_READY)
                         plm.load_tile(pv_vec, pv_buf, [core_id * 4 + q_mat_idx * 2 + sub_id, 0])
                         pl.system.sync_src(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
                         pl.system.sync_dst(set_pipe=pl.PipeType.MTE2, wait_pipe=pl.PipeType.V, event_id=0)
@@ -344,47 +350,46 @@ def fa_k_kernel_bn(
                     plm.cast(o_f16, running_o, target_type=pl.FP16, mode="round")
                     pl.system.sync_src(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
                     pl.system.sync_dst(set_pipe=pl.PipeType.V, wait_pipe=pl.PipeType.MTE3, event_id=0)
-                    plm.store_tile(o, o_f16, [b_idx, n_idx, qi * 2 + sub_id, 0])
+                    plm.store_tile(o, o_f16, [b_idx, qi * 2 + sub_id, n_idx, 0], tile_dims=[1, 3])
     return o
 
 
-def flash_attention_ref_bn(q, k, v, d):
+def flash_attention_ref_bs(q, k, v, d):
     scale_val = 1.0 / math.sqrt(d)
-    b, n, sq, d_ = q.shape
-    _, _, skv, _ = k.shape
+    b, sq, n, d_ = q.shape
+    _, skv, _, _ = k.shape
     o_ref = torch.zeros_like(q)
     for bi in range(b):
         for ni in range(n):
-            qk = torch.matmul(q[bi, ni].float(), k[bi, ni].float().T) * scale_val
+            qk = torch.matmul(q[bi, :, ni, :].float(), k[bi, :, ni, :].float().T) * scale_val
             attn = torch.softmax(qk, dim=-1)
-            o_ref[bi, ni] = torch.matmul(attn, v[bi, ni].float()).half()
+            o_ref[bi, :, ni, :] = torch.matmul(attn, v[bi, :, ni, :].float()).half()
     return o_ref
 
 
-def test_fa_k_bn():
-    compiled = fe.compile(fa_k_kernel_bn, arch="a3")
+def test_fa_k_bs():
+    compiled = fe.compile(fa_k_kernel_bs, arch="a3")
     print("compiled:", compiled.lib_path)
     device = "npu:5"
     torch.npu.set_device(device)
     torch.manual_seed(42)
-    for b, n, sq, skv, d, num_cores in [
-        (6, 1, 256, 256, TD, 24),
-        (2, 1, 1024, 1024, TD, 12),
-        (1, 4, 8192, 8192, TD, 24),
-        (2, 4, 512, 512, TD, 24),
-        (2, 4, 2048, 2048, TD, 24),
-        (4, 8, 512, 512, TD, 24),
+    for b, sq, n, skv, d, num_cores in [
+        (6, 256, 1, 256, TD, 24),
+        (2, 1024, 1, 1024, TD, 12),
+        (1, 8192, 4, 8192, TD, 24),
+        (2, 512, 4, 512, TD, 24),
+        (2, 2048, 4, 2048, TD, 24),
+        (4, 512, 8, 512, TD, 24),
     ]:
-        print(f"\nFA-K-BN (b={b}, n={n}, sq={sq}, skv={skv}, d={d}) cores={num_cores}")
-        q = torch.rand((b, n, sq, d), device=device, dtype=torch.float16)
-        k = torch.rand((b, n, skv, d), device=device, dtype=torch.float16)
-        v = torch.rand((b, n, skv, d), device=device, dtype=torch.float16)
-        o = torch.zeros((b, n, sq, d), device=device, dtype=torch.float16)
-        qk_buf = torch.zeros((b, n, sq, skv), device=device, dtype=torch.float32)
-        p_buf = torch.zeros((b, n, sq, skv), device=device, dtype=torch.float16)
+        print(f"\nFA-K-BS (b={b}, sq={sq}, n={n}, skv={skv}, d={d}) cores={num_cores}")
+        q = torch.rand((b, sq, n, d), device=device, dtype=torch.float16)
+        k = torch.rand((b, skv, n, d), device=device, dtype=torch.float16)
+        v = torch.rand((b, skv, n, d), device=device, dtype=torch.float16)
+        o = torch.zeros((b, sq, n, d), device=device, dtype=torch.float16)
+        qk_buf = torch.zeros((b, sq, n, skv), device=device, dtype=torch.float32)
+        p_buf = torch.zeros((b, sq, n, skv), device=device, dtype=torch.float16)
         pv_buf = torch.zeros((48 * TS, d), device=device, dtype=torch.float32)
         
-        # 计算负载均衡的b_ranges和n_ranges（确保不跨b边界）
         total_work = b * n
         b_ranges = torch.zeros((num_cores, 2), device=device, dtype=torch.int32)
         n_ranges = torch.zeros((num_cores, 2), device=device, dtype=torch.int32)
@@ -400,40 +405,72 @@ def test_fa_k_bn():
             remaining_cores = num_cores - core
             ideal_work = (remaining_work + remaining_cores - 1) // remaining_cores if remaining_cores > 0 else remaining_work
             
-            if n == 1:
-                end_work = min(start_work + ideal_work, total_work)
-                end_b = end_work // n
-                
-                b_ranges[core, 0] = start_b
-                b_ranges[core, 1] = end_b
-                n_ranges[core, 0] = 0
-                n_ranges[core, 1] = 1
-                
-                current_work = end_work
-            else:
-                remaining_in_b = n - start_n
-                actual_work = min(ideal_work, remaining_in_b)
-                
-                b_ranges[core, 0] = start_b
-                b_ranges[core, 1] = start_b + 1
-                n_ranges[core, 0] = start_n
-                n_ranges[core, 1] = start_n + actual_work
-                
-                current_work += actual_work
+            remaining_in_b = n - start_n
+            actual_work = min(ideal_work, remaining_in_b)
+            
+            b_ranges[core, 0] = start_b
+            b_ranges[core, 1] = start_b + 1
+            n_ranges[core, 0] = start_n
+            n_ranges[core, 1] = start_n + actual_work
+            
+            current_work += actual_work
             core += 1
-
-        actual_num_cores = core
-        fe.launch(None, actual_num_cores, compiled, q, k, v, o, qk_buf, p_buf, pv_buf, b_ranges, n_ranges)
+        
+        fe.launch(None, num_cores, compiled, q, k, v, o, qk_buf, p_buf, pv_buf, b_ranges, n_ranges)
         torch.npu.synchronize()
-        o_ref = flash_attention_ref_bn(q, k, v, d)
+
+        # Print intermediate results for debugging
+        print(f"  Q shape: {q.shape}, dtype: {q.dtype}")
+        print(f"  K shape: {k.shape}, dtype: {k.dtype}")
+        print(f"  V shape: {v.shape}, dtype: {v.dtype}")
+        print(f"  QK_buf shape: {qk_buf.shape}, dtype: {qk_buf.dtype}")
+        print(f"  P_buf shape: {p_buf.shape}, dtype: {p_buf.dtype}")
+        print(f"  O shape: {o.shape}, dtype: {o.dtype}")
+        
+        # Print statistics of intermediate results
+        print(f"  Q stats: min={q.min().item():.4f}, max={q.max().item():.4f}, mean={q.mean().item():.4f}")
+        print(f"  K stats: min={k.min().item():.4f}, max={k.max().item():.4f}, mean={k.mean().item():.4f}")
+        print(f"  V stats: min={v.min().item():.4f}, max={v.max().item():.4f}, mean={v.mean().item():.4f}")
+        print(f"  QK_buf stats: min={qk_buf.min().item():.4f}, max={qk_buf.max().item():.4f}, mean={qk_buf.mean().item():.4f}")
+        print(f"  P_buf stats: min={p_buf.min().item():.4f}, max={p_buf.max().item():.4f}, mean={p_buf.mean().item():.4f}")
+        print(f"  O stats: min={o.min().item():.4f}, max={o.max().item():.4f}, mean={o.mean().item():.4f}")
+        
+        # Check if QK_buf has NaN or Inf
+        if torch.isnan(qk_buf).any():
+            print(f"  WARNING: QK_buf contains NaN!")
+        if torch.isinf(qk_buf).any():
+            print(f"  WARNING: QK_buf contains Inf!")
+        
+        # Check if P_buf has NaN or Inf
+        if torch.isnan(p_buf).any():
+            print(f"  WARNING: P_buf contains NaN!")
+        if torch.isinf(p_buf).any():
+            print(f"  WARNING: P_buf contains Inf!")
+        
+        # Check if O has NaN or Inf
+        if torch.isnan(o).any():
+            print(f"  WARNING: O contains NaN!")
+        if torch.isinf(o).any():
+            print(f"  WARNING: O contains Inf!")
+        
+        o_ref = flash_attention_ref_bs(q, k, v, d)
+        print(f"  O_ref stats: min={o_ref.min().item():.4f}, max={o_ref.max().item():.4f}, mean={o_ref.mean().item():.4f}")
+        
         diff = (o - o_ref).abs().max().item()
         print(f"  max|diff|={diff:.4f}")
+        
+        # Print per-head differences
+        for ni in range(n):
+            diff_head = (o[:, :, ni, :] - o_ref[:, :, ni, :]).abs().max().item()
+            print(f"  Head {ni} max|diff|={diff_head:.4f}")
+        
         torch.testing.assert_close(o, o_ref, rtol=1e-3, atol=1e-3)
         print("  PASS")
 
 
 if __name__ == "__main__":
-    print("FA DN layout for K, multi-core + Q tiling + double buffer + BN axis")
+    print("FA DN layout for K, multi-core + Q tiling + double buffer + BS axis")
+    print("S-dimension stride: N*D (S jumps across N heads)")
     print("=" * 60)
-    test_fa_k_bn()
+    test_fa_k_bs()
     print("\nAll FlashAttention tests passed!")

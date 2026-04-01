@@ -53,6 +53,109 @@ using ir::Var;
 // ============================================================================
 
 static const std::vector<std::string> kManualCmpModes = {"EQ", "NE", "LT", "LE", "GT", "GE"};
+
+// ============================================================================
+// tile_dims helpers
+// ============================================================================
+
+/// Parse a comma-separated tile_dims string "1,3" -> {1, 3}.
+static std::vector<int> ParseTileDims(const std::string& s) {
+  std::vector<int> result;
+  std::istringstream ss(s);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    result.push_back(std::stoi(token));
+  }
+  return result;
+}
+
+/// Build a strided 2D tensor_view for non-contiguous tile dimensions.
+///
+/// For tensor [B, Sq, N, D] with tile_dims=[1, 3]:
+///   - Strides (row-major): B -> Sq*N*D, Sq -> N*D, N -> D, D -> 1
+///   - Base offset = sum of (offset_i * stride_i) for non-tile dims
+///   - 2D view: shape=[dim_row, dim_col], strides=[stride_row, stride_col]
+///
+/// @param is_dn  If true, create DN (transposed) view.
+/// @param[out] view_for_partition  The created tensor_view SSA name.
+/// @param[out] tensor_view_type    The MLIR type string for the view.
+/// @param[out] row_off             Row offset for partition_view.
+/// @param[out] col_off             Col offset for partition_view.
+static void BuildStridedTileDimsView(
+    codegen::PTOCodegen& codegen,
+    const std::vector<int>& tile_dims,
+    const std::vector<std::string>& dims,
+    const ir::MakeTuplePtr& offsets_tuple,
+    const std::string& raw_ptr,
+    const std::string& dtype_str,
+    size_t tensor_ndim,
+    bool is_dn,
+    std::string& view_out,
+    std::string& tensor_view_type_out,
+    std::string& row_off_out,
+    std::string& col_off_out) {
+
+  int row_dim = tile_dims[0];
+  int col_dim = tile_dims[1];
+  std::string c1 = codegen.GetIndexConstant(1);
+
+  // Compute per-dimension strides (row-major):
+  // stride[n-1] = 1, stride[i] = stride[i+1] * dim[i+1]
+  std::vector<std::string> strides(tensor_ndim);
+  strides[tensor_ndim - 1] = c1;
+  for (int i = static_cast<int>(tensor_ndim) - 2; i >= 0; --i) {
+    std::string s = codegen.NewTemp();
+    codegen.Emit(s + " = arith.muli " + strides[i + 1] + ", " + dims[i + 1] + " : index");
+    strides[i] = s;
+  }
+
+  // Base offset from non-tile dimensions:
+  // base = sum(offset_i * stride_i) for i not in tile_dims
+  std::string base_off = codegen.GetIndexConstant(0);
+  for (size_t i = 0; i < tensor_ndim; ++i) {
+    if (static_cast<int>(i) == row_dim || static_cast<int>(i) == col_dim) continue;
+    std::string off_i = codegen.GetExprAsCode(offsets_tuple->elements_[i]);
+    std::string term = codegen.NewTemp();
+    codegen.Emit(term + " = arith.muli " + off_i + ", " + strides[i] + " : index");
+    std::string new_base = codegen.NewTemp();
+    codegen.Emit(new_base + " = arith.addi " + base_off + ", " + term + " : index");
+    base_off = new_base;
+  }
+
+  // Offset raw pointer by base
+  std::string ptr_type_str = "!pto.ptr<" + dtype_str + ">";
+  std::string offseted_ptr = codegen.NewTemp();
+  codegen.Emit(offseted_ptr + " = pto.addptr " + raw_ptr + ", " + base_off +
+               " : " + ptr_type_str + " -> " + ptr_type_str);
+
+  tensor_view_type_out = "!pto.tensor_view<?x?x" + dtype_str + ">";
+  std::string view = codegen.NewTemp();
+
+  if (is_dn) {
+    // DN: shape=[dim_col, dim_row], strides=[stride_col, stride_row], layout=dn
+    std::ostringstream tv;
+    tv << view << " = pto.make_tensor_view " << offseted_ptr
+       << ", shape = [" << dims[col_dim] << ", " << dims[row_dim] << "],"
+       << " strides = [" << strides[col_dim] << ", " << strides[row_dim] << "]"
+       << " {layout = #pto.layout<dn>}"
+       << " : " << tensor_view_type_out;
+    codegen.Emit(tv.str());
+    row_off_out = codegen.GetExprAsCode(offsets_tuple->elements_[col_dim]);
+    col_off_out = codegen.GetExprAsCode(offsets_tuple->elements_[row_dim]);
+  } else {
+    // ND: shape=[dim_row, dim_col], strides=[stride_row, stride_col]
+    std::ostringstream tv;
+    tv << view << " = pto.make_tensor_view " << offseted_ptr
+       << ", shape = [" << dims[row_dim] << ", " << dims[col_dim] << "],"
+       << " strides = [" << strides[row_dim] << ", " << strides[col_dim] << "]"
+       << " : " << tensor_view_type_out;
+    codegen.Emit(tv.str());
+    row_off_out = codegen.GetExprAsCode(offsets_tuple->elements_[row_dim]);
+    col_off_out = codegen.GetExprAsCode(offsets_tuple->elements_[col_dim]);
+  }
+
+  view_out = view;
+}
 static const std::vector<std::string> kManualRoundModes = {"NONE", "RINT",  "ROUND", "FLOOR",
                                                            "CEIL", "TRUNC", "ODD",   "CAST_RINT"};
 
@@ -469,7 +572,22 @@ static std::string MakeManualLoadCodegenPTO(const CallPtr& op, codegen::CodegenB
     }
   }
 
-  if (is_dn) {
+  // Parse tile_dims kwarg if present (e.g. "1,3" for BSND layout)
+  std::vector<int> tile_dims_vec;
+  bool has_tile_dims = op->HasKwarg("tile_dims");
+  if (has_tile_dims) {
+    tile_dims_vec = ParseTileDims(op->GetKwarg<std::string>("tile_dims"));
+    INTERNAL_CHECK(tile_dims_vec.size() == 2)
+        << "manual.load: tile_dims must have exactly 2 elements";
+  }
+
+  if (has_tile_dims && tensor_ndim > 2) {
+    // Non-contiguous tile dimensions: use strided 2D tensor_view
+    std::string raw_ptr = codegen.GetTensorPtr(tensor);
+    BuildStridedTileDimsView(codegen, tile_dims_vec, dims, offsets_tuple,
+                             raw_ptr, dtype_str, tensor_ndim, is_dn,
+                             view_for_partition, tensor_view_type, row_off, col_off);
+  } else if (is_dn) {
     // DN layout: emit a transposed make_tensor_view from the raw pointer.
     // For N-D tensor, DN layout applies to the last two dimensions.
     // We create a 2D tensor_view for the last two dims, using pto.addptr for batch offset.
@@ -687,11 +805,45 @@ static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::Codegen
   size_t tensor_ndim = tensor_type->shape_.size();
   INTERNAL_CHECK(tensor_ndim >= 2) << "manual.store: tensor must have at least 2 dimensions";
 
+  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
+  std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
+  std::string tile_buf_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
+
+  // Get all dimensions
+  std::vector<std::string> dims(tensor_ndim);
+  for (size_t i = 0; i < tensor_ndim; ++i) {
+    if (auto var_i = As<ir::Var>(tensor_type->shape_[i])) {
+      dims[i] = codegen.GetVarName(var_i);
+    } else {
+      dims[i] = codegen.GetIndexConstant(codegen.GetConstIntValue(tensor_type->shape_[i]));
+    }
+  }
+
+  // Parse tile_dims kwarg if present (e.g. "1,3" for BSND layout)
+  std::vector<int> tile_dims_vec;
+  bool has_tile_dims = op->HasKwarg("tile_dims");
+  if (has_tile_dims) {
+    tile_dims_vec = ParseTileDims(op->GetKwarg<std::string>("tile_dims"));
+    INTERNAL_CHECK(tile_dims_vec.size() == 2)
+        << "manual.store: tile_dims must have exactly 2 elements";
+  }
+
   std::string row_off, col_off;
-  if (tensor_ndim == 2) {
+  std::string tensor_view, tensor_view_type;
+
+  if (has_tile_dims && tensor_ndim > 2) {
+    // Non-contiguous tile dimensions: use strided 2D tensor_view
+    std::string raw_ptr = codegen.GetTensorPtr(output_tensor);
+    BuildStridedTileDimsView(codegen, tile_dims_vec, dims, offsets_tuple,
+                             raw_ptr, dtype_str, tensor_ndim, /*is_dn=*/false,
+                             tensor_view, tensor_view_type, row_off, col_off);
+  } else if (tensor_ndim == 2) {
     row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
     col_off = codegen.GetExprAsCode(offsets_tuple->elements_[1]);
+    tensor_view = codegen.GetOrCreateTensorView(output_tensor);
+    tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
   } else {
+    // Default N>2: flatten dims 0..N-2 into row offset
     std::string flat_row_off = codegen.GetExprAsCode(offsets_tuple->elements_[0]);
     for (size_t i = 1; i < tensor_ndim - 1; ++i) {
       std::string dim_i;
@@ -713,48 +865,17 @@ static std::string MakeManualStoreCodegenPTO(const CallPtr& op, codegen::Codegen
     }
     row_off = flat_row_off;
     col_off = codegen.GetExprAsCode(offsets_tuple->elements_[tensor_ndim - 1]);
-  }
 
-  std::string dtype_str = codegen.GetTypeString(tensor_type->dtype_);
-  std::string tile_buf = codegen.GetExprAsCode(op->args_[0]);
-
-  std::string tile_buf_type = codegen.GetTileBufTypeStringFromTileType(tile_type);
-
-  // Get all dimensions
-  std::vector<std::string> dims(tensor_ndim);
-  for (size_t i = 0; i < tensor_ndim; ++i) {
-    if (auto var_i = As<ir::Var>(tensor_type->shape_[i])) {
-      dims[i] = codegen.GetVarName(var_i);
-    } else {
-      dims[i] = codegen.GetIndexConstant(codegen.GetConstIntValue(tensor_type->shape_[i]));
-    }
-  }
-
-  std::string tensor_view, tensor_view_type;
-  if (tensor_ndim == 2) {
-    tensor_view = codegen.GetOrCreateTensorView(output_tensor);
-    tensor_view_type = codegen.GetTensorViewTypeString(tensor_type.get());
-  } else {
-    // For N-D tensor (N > 2), create a flattened 2D tensor_view
-    // row_off = ((offset[0] * dim[1] + offset[1]) * dim[2] + ... + offset[N-2])
-    // This is the linear index into a [prod(dim[0..N-2])] array
-    // For 4D tensor [B, N, Sq, D], row_off = ((b_idx * N + n_idx) * Sq + sq_off)
-    // So the flattened row dimension should be B * N * Sq = prod(dim[0..N-2])
+    // Create flattened 2D tensor_view
     std::string raw_ptr = codegen.GetTensorPtr(output_tensor);
-    
-    // Compute flattened row dimension: prod(dim[0..N-2])
-    // For 4D tensor [B, N, Sq, D], this is B * N * Sq
     std::string flat_row_dim = dims[0];
     for (size_t i = 1; i < tensor_ndim - 1; ++i) {
       std::string new_dim = codegen.NewTemp();
       codegen.Emit(new_dim + " = arith.muli " + flat_row_dim + ", " + dims[i] + " : index");
       flat_row_dim = new_dim;
     }
-    
     std::string col_dim = dims[tensor_ndim - 1];
     std::string c1 = codegen.GetIndexConstant(1);
-    
-    // Create a 2D tensor_view with shape [flat_row_dim, col_dim]
     std::string nd_view = codegen.NewTemp();
     tensor_view_type = "!pto.tensor_view<?x?x" + dtype_str + ">";
     std::ostringstream tv_line;

@@ -71,19 +71,24 @@ static std::string DataTypeToMLIRImpl(::pypto::DataType dtype) {
     return "f16";
   } else if (dtype == ::pypto::DataType::BF16) {
     return "bf16";
+  } else if (dtype == ::pypto::DataType::INT8) {
+    return "i8";
+  } else if (dtype == ::pypto::DataType::UINT8) {
+    return "ui8";
+  } else if (dtype == ::pypto::DataType::INT16) {
+    return "i16";
+  } else if (dtype == ::pypto::DataType::UINT16) {
+    return "ui16";
   } else if (dtype == ::pypto::DataType::INT32) {
     return "i32";
+  } else if (dtype == ::pypto::DataType::UINT32) {
+    return "ui32";
   } else if (dtype == ::pypto::DataType::INDEX) {
     return "index";
   } else if (dtype == ::pypto::DataType::INT64) {
     return "i64";
   } else if (dtype == ::pypto::DataType::UINT64) {
-    // UINT64 is mapped to i64 for compatibility with arith.index_cast
-    return "i64";
-  } else if (dtype == ::pypto::DataType::INT8) {
-    return "i8";
-  } else if (dtype == ::pypto::DataType::UINT8) {
-    return "ui8";
+    return "ui64";
   } else if (dtype == ::pypto::DataType::BOOL) {
     return "i1";
   } else {

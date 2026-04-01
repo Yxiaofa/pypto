@@ -262,6 +262,7 @@ def load_tile(
     tensor: Tensor,
     tile_offsets: Sequence[int | Expr],
     layout: str | None = None,
+    tile_dims: list[int] | None = None,
 ) -> None:
     """Load data from a global tensor into a pre-allocated tile using tile-relative offsets.
 
@@ -274,6 +275,11 @@ def load_tile(
     - ``b`` and ``n`` are used directly
     - ``s_tile * TS`` and ``d_tile * TD`` are computed for the last two dims
 
+    Example for BSND layout [B, S, N, D] with 2D tile [TS, TD]:
+    - ``load_tile(tile, tensor, [b, s_tile, n, d_tile], tile_dims=[1, 3])``
+    - ``b`` and ``n`` are used directly
+    - ``s_tile * TS`` and ``d_tile * TD`` are computed for dimensions 1 and 3
+
     Args:
         out: Pre-allocated destination tile; rebound on return.
         tensor: Source global tensor.
@@ -281,8 +287,11 @@ def load_tile(
             last M are tile-relative offsets.
         layout: Tensor memory layout. ``"dn"`` for column-major (DN) layout,
             which lets TLOAD transpose on-chip. Default is row-major (ND).
+        tile_dims: Optional list of dimension indices that tile corresponds to.
+            If None, defaults to last M dimensions (BNSD layout).
+            For BSND layout [B, S, N, D] with tile [TS, TD], use tile_dims=[1, 3].
     """
-    out._expr = _ir_manual.load_tile(out.unwrap(), tensor.unwrap(), _to_make_tuple(tile_offsets), layout=layout)
+    out._expr = _ir_manual.load_tile(out.unwrap(), tensor.unwrap(), _to_make_tuple(tile_offsets), layout=layout, tile_dims=tile_dims)
 
 
 def store(
@@ -314,6 +323,7 @@ def store_tile(
     output_tensor: Tensor,
     tile: Tile,
     tile_offsets: Sequence[int | Expr],
+    tile_dims: list[int] | None = None,
 ) -> Tensor:
     """Store data from a tile back to a global tensor using tile-relative offsets.
 
@@ -326,16 +336,24 @@ def store_tile(
     - ``b`` and ``n`` are used directly
     - ``s_tile * TS`` and ``d_tile * TD`` are computed for the last two dims
 
+    Example for BSND layout [B, S, N, D] with 2D tile [TS, TD]:
+    - ``store_tile(tensor, tile, [b, s_tile, n, d_tile], tile_dims=[1, 3])``
+    - ``b`` and ``n`` are used directly
+    - ``s_tile * TS`` and ``d_tile * TD`` are computed for dimensions 1 and 3
+
     Args:
         output_tensor: Destination tensor.
         tile: Source tile.
         tile_offsets: Per-dimension offsets. First (N-M) are direct offsets,
             last M are tile-relative offsets.
+        tile_dims: Optional list of dimension indices that tile corresponds to.
+            If None, defaults to last M dimensions (BNSD layout).
+            For BSND layout [B, S, N, D] with tile [TS, TD], use tile_dims=[1, 3].
 
     Returns:
         Tensor wrapping the store result.
     """
-    return Tensor(expr=_ir_manual.store_tile(output_tensor.unwrap(), tile.unwrap(), _to_make_tuple(tile_offsets)))
+    return Tensor(expr=_ir_manual.store_tile(output_tensor.unwrap(), tile.unwrap(), _to_make_tuple(tile_offsets), tile_dims=tile_dims))
 
 
 def l0c_store(
