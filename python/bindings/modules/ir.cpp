@@ -95,12 +95,14 @@ std::vector<std::pair<std::string, std::any>> ConvertKwargsDict(const py::dict& 
   for (auto item : kwargs_dict) {
     std::string key = py::cast<std::string>(item.first);
 
-    // Try to cast to common types
-    // NOTE: Check DataType/MemorySpace/PipeType/CoreType BEFORE int, and bool BEFORE int
+    // Try to cast to common types.
+    // NOTE: Check enum-like values BEFORE plain int, and bool BEFORE int.
     if (py::isinstance<DataType>(item.second)) {
       kwargs.emplace_back(key, py::cast<DataType>(item.second));
     } else if (py::isinstance<MemorySpace>(item.second)) {
       kwargs.emplace_back(key, py::cast<MemorySpace>(item.second));
+    } else if (py::isinstance<TilePad>(item.second)) {
+      kwargs.emplace_back(key, static_cast<int>(py::cast<TilePad>(item.second)));
     } else if (py::isinstance<PipeType>(item.second)) {
       // Cast enum to int for storage
       kwargs.emplace_back(key, static_cast<int>(py::cast<PipeType>(item.second)));
@@ -503,6 +505,8 @@ void BindIR(py::module_& m) {
         for (const auto& [key, value] : self->kwargs_) {
           if (value.type() == typeid(int)) {
             result[key.c_str()] = AnyCast<int>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(int64_t)) {
+            result[key.c_str()] = AnyCast<int64_t>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(bool)) {
             result[key.c_str()] = AnyCast<bool>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(std::string)) {
@@ -513,6 +517,8 @@ void BindIR(py::module_& m) {
             result[key.c_str()] = AnyCast<float>(value, "converting to Python: " + key);
           } else if (value.type() == typeid(DataType)) {
             result[key.c_str()] = AnyCast<DataType>(value, "converting to Python: " + key);
+          } else if (value.type() == typeid(TilePad)) {
+            result[key.c_str()] = AnyCast<TilePad>(value, "converting to Python: " + key);
           }
         }
         return result;

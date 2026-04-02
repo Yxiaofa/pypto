@@ -46,6 +46,14 @@ void ValidateKwargs(const std::vector<std::pair<std::string, std::any>>& kwargs,
         throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
                         "' expects DataType or int, but got incompatible type");
       }
+    } else if (it->second == std::type_index(typeid(int))) {
+      std::type_index value_type(value.type());
+      if (value_type != std::type_index(typeid(int)) &&
+          value_type != std::type_index(typeid(int64_t)) &&
+          value_type != std::type_index(typeid(TilePad))) {
+        throw TypeError("Kwarg '" + key + "' for operator '" + op_name +
+                        "' expects int/int64/TilePad, but got incompatible type");
+      }
     } else if (it->second == std::type_index(typeid(MemorySpace))) {
       if (std::type_index(value.type()) != std::type_index(typeid(MemorySpace))) {
         throw TypeError("Kwarg '" + key + "' for operator '" + op_name +

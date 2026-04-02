@@ -21,6 +21,7 @@
 
 #include <any>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -51,6 +52,22 @@ static TypePtr DeduceManualOutTileType(const std::vector<ExprPtr>& args,
   CHECK(out_type) << "The operator " << op_name
                   << " requires last argument (out) to be TileType, but got "
                   << args.back()->GetType()->TypeName();
+  return out_type;
+}
+
+static TypePtr DeduceManualFillPadType(const std::vector<ExprPtr>& args,
+                                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
+  auto out_type = As<TileType>(DeduceManualOutTileType(args, kwargs, "manual.fillpad", 2));
+  CHECK(out_type) << "manual.fillpad: out must be TileType";
+  CHECK(out_type->tile_view_.has_value())
+      << "manual.fillpad: out tile must carry tile_view metadata";
+
+  TileView view = out_type->tile_view_.value();
+  int pad_value = static_cast<int>(view.pad);
+  CHECK(pad_value >= static_cast<int>(TilePad::null) && pad_value <= static_cast<int>(TilePad::min))
+      << "manual.fillpad: out.tile_view.pad must be one of TilePad.null/zero/max/min";
+  CHECK(pad_value != static_cast<int>(TilePad::null))
+      << "manual.fillpad: out.tile_view.pad must not be TilePad.null";
   return out_type;
 }
 
@@ -172,7 +189,7 @@ REGISTER_OP("manual.fillpad")
     .add_argument("out", "Pre-allocated destination tile (TileType)")
     .f_deduce_type([](const std::vector<ExprPtr>& args,
                       const std::vector<std::pair<std::string, std::any>>& kwargs) {
-      return DeduceManualOutTileType(args, kwargs, "manual.fillpad", 2);
+      return DeduceManualFillPadType(args, kwargs);
     });
 
 // manual.set_validshape: (row, col, tile) -> TileType (tile's type)
