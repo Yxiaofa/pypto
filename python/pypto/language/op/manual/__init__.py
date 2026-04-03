@@ -16,28 +16,27 @@ accept the output tile as their last argument and return ``None``.
 
 Example::
 
-    import pypto.language.manual as pm
+    import pypto.language.op.manual as pm
     from pypto.pypto_core import DataType
     from pypto.pypto_core.ir import MemorySpace
 
-    # Allocate tiles
-    a   = pm.make_tile([64, 64], DataType.FP32)
-    b   = pm.make_tile([64, 64], DataType.FP32)
-    out = pm.make_tile([64, 64], DataType.FP32)
+    tile_ty = pm.TileType(
+        shape=[64, 64],
+        dtype=DataType.FP32,
+        target_memory=MemorySpace.Vec,
+    )
+    a = pm.make_tile(tile_ty, addr=0x0000, size=16384)
+    b = pm.make_tile(tile_ty, addr=0x4000, size=16384)
+    out = pm.make_tile(tile_ty, addr=0x8000, size=16384)
 
-    # Load inputs
-    pm.load(tensor_a, [0, 0], [64, 64], a)
-    pm.load(tensor_b, [0, 0], [64, 64], b)
-
-    # Compute
+    pm.load(a, tensor_a, [0, 0])
+    pm.load(b, tensor_b, [0, 0])
     pm.add(a, b, out)
-
-    # Store result
-    pm.store(out, [0, 0], [64, 64], result_tensor)
+    pm.store(result_tensor, out, [0, 0])
 """
 
 from pypto.pypto_core import DataType
-from pypto.pypto_core.ir import MemorySpace
+from pypto.pypto_core.ir import MemorySpace, TilePad
 
 from ...typing import DynVar, Scalar, Tensor, Tile, dynamic  # noqa: E402
 from .op.manual_ops import (
@@ -160,6 +159,7 @@ __all__ = [
     "Tensor", "Tile", "Scalar", "DynVar", "dynamic",
     "TileType",
     "MemorySpace",
+    "TilePad",
     # Allocation
     "make_tile",
     # Memory

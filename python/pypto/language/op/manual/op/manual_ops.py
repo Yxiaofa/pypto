@@ -16,11 +16,12 @@ subsequent uses of the same Tile object see the latest written value.
 
 Typical usage::
 
-    import pypto.language.manual as pm
+    import pypto.language.op.manual as pm
 
-    out = pm.make_tile([64, 64], pm.FP32)
-    a   = pm.make_tile([64, 64], pm.FP32)
-    b   = pm.make_tile([64, 64], pm.FP32)
+    tile_ty = pm.TileType(shape=[64, 64], dtype=pm.FP32)
+    a = pm.make_tile(tile_ty, addr=0x0000, size=16384)
+    b = pm.make_tile(tile_ty, addr=0x4000, size=16384)
+    out = pm.make_tile(tile_ty, addr=0x8000, size=16384)
 
     pm.load(a, tensor_a, [0, 0])
     pm.load(b, tensor_b, [0, 0])
@@ -63,7 +64,7 @@ class TileType:
         slayout: Scatter layout (0=none_box, 1=row_major, 2=col_major, optional).
             Auto-filled per memory space if omitted.
         fractal: Fractal size (optional). Auto-filled: 512 for FP16, 1024 for FP32 ACC.
-        pad: Pad mode (0=null, 1=zero, 2=max, 3=min, optional).
+        pad: Pad mode (TilePad.null/zero/max/min or integer encoding, optional).
         compact: Compact mode (0=null, 1=normal, 2=row_plus_one, optional).
     """
     shape: Sequence[int] | _ir_core.MakeTuple
@@ -73,10 +74,11 @@ class TileType:
     blayout: Optional[int] = None
     slayout: Optional[int] = None
     fractal: Optional[int] = None
-    pad: Optional[int] = None
+    pad: Optional[int | _ir_core.TilePad] = None
     compact: Optional[int] = None
 
     def __post_init__(self):
+        self.pad = _normalize_tile_pad(self.pad)
         _apply_default_layout(self)
 
 
@@ -96,6 +98,24 @@ _LEFT_A5_LAYOUT: tuple[int, int] = (2, 1)
 _MAT_DN_LAYOUT: tuple[int, int] = (1, 2)
 
 _LAYOUT_NAMES = {0: "none_box", 1: "row_major", 2: "col_major"}
+_PAD_VALUES = {
+    _ir_core.TilePad.null: 0,
+    _ir_core.TilePad.zero: 1,
+    _ir_core.TilePad.max: 2,
+    _ir_core.TilePad.min: 3,
+}
+
+
+def _normalize_tile_pad(pad: int | _ir_core.TilePad | None) -> int | None:
+    if pad is None:
+        return None
+    if pad in _PAD_VALUES:
+        return _PAD_VALUES[pad]
+    if isinstance(pad, int):
+        if pad not in _PAD_VALUES.values():
+            raise ValueError("TileType.pad must be one of TilePad.null/zero/max/min")
+        return pad
+    raise TypeError("TileType.pad must be a TilePad or integer 0/1/2/3")
 
 
 def _apply_default_layout(tt: "TileType") -> None:
@@ -448,12 +468,14 @@ def full(value: int | float | Expr | Scalar, out: Tile) -> None:
     _op("manual.full", [val_expr], out)
 
 
-def fillpad(tile: Tile, out: Tile) -> None:
+def fillpad(out: Tile, tile: Tile) -> None:
     """Fill a pre-allocated tile with padding from *tile*.
 
     Args:
-        tile: Source tile providing the data.
         out: Pre-allocated destination tile; rebound on return.
+            The destination tile's ``TileType`` determines the post-fill buffer
+            shape/metadata, and ``TileType.pad`` determines the padding mode.
+        tile: Source tile providing the data.
     """
     _op("manual.fillpad", [tile.unwrap()], out)
 

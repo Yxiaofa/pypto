@@ -21,7 +21,7 @@ Tests verify:
 
 from dataclasses import dataclass
 import pypto.language as pl
-import pypto.language.manual as plm
+import pypto.language.op.manual as plm
 import pytest
 from pypto import DataType, backend, codegen, ir
 from pypto.backend import BackendType
@@ -786,6 +786,101 @@ def test_pto_codegen_dump_tile_dynamic_valid_shape_lowering():
     assert "pto.set_validshape" in mlir_code
     assert "pto.tprint ins(" in mlir_code
     assert "v_row=?, v_col=?" in mlir_code
+
+
+def test_pto_codegen_manual_fillpad_updates_pad_and_valid_shape():
+    """plm.fillpad should lower to pto.tfillpad using the destination tile's type metadata."""
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    @pl.program
+    class ManualFillPadProgram:
+        @pl.function
+        def fillpad_dynamic_tile(
+            self,
+            rows: pl.Scalar[pl.INDEX],
+            cols: pl.Scalar[pl.INDEX],
+            output: pl.Tensor[[16, 16], pl.FP32],
+        ):
+            src_type = plm.TileType(
+                shape=[16, 16],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                valid_shape=[-1, -1],
+            )
+            dst_type = plm.TileType(
+                shape=[16, 16],
+                dtype=pl.FP32,
+                target_memory=pl.MemorySpace.Vec,
+                pad=plm.TilePad.zero,
+            )
+            src = plm.make_tile(src_type, addr=0x0000, size=1024)
+            dst = plm.make_tile(dst_type, addr=0x1000, size=1024)
+            plm.set_validshape(src, rows, cols)
+            plm.fillpad(dst, src)
+            plm.dump_tile(dst)
+            return output
+
+    pm = PassManager.get_strategy(OptimizationStrategy.PTOAS)
+    transformed_program = pm.run_passes(ManualFillPadProgram)
+
+    codegen_obj = PTOCodegen()
+    mlir_code = _get_mlir_code(codegen_obj.generate(transformed_program))
+
+    assert "pto.set_validshape" in mlir_code
+    assert "pto.tfillpad ins(" in mlir_code
+    assert "pad=1" in mlir_code
+    assert "v_row=16, v_col=16" in mlir_code
+
+
+def test_manual_fillpad_rejects_invalid_pad_modes():
+    backend.reset_for_testing()
+    backend.set_backend_type(BackendType.PTO)
+
+    with pytest.raises(TypeError):
+        @pl.program
+        class InvalidFillPadTypeProgram:
+            @pl.function
+            def invalid_fillpad_type(
+                self,
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ):
+                tile_type = plm.TileType(
+                    shape=[16, 16],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    valid_shape=[-1, -1],
+                    pad="zero",
+                )
+                src = plm.make_tile(tile_type, addr=0x0000, size=1024)
+                dst = plm.make_tile(tile_type, addr=0x1000, size=1024)
+                plm.fillpad(dst, src)
+                return output
+
+    with pytest.raises(ValueError):
+        @pl.program
+        class InvalidFillPadNullProgram:
+            @pl.function
+            def invalid_fillpad_null(
+                self,
+                output: pl.Tensor[[16, 16], pl.FP32],
+            ):
+                src_type = plm.TileType(
+                    shape=[16, 16],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    valid_shape=[-1, -1],
+                )
+                dst_type = plm.TileType(
+                    shape=[16, 16],
+                    dtype=pl.FP32,
+                    target_memory=pl.MemorySpace.Vec,
+                    pad=plm.TilePad.null,
+                )
+                src = plm.make_tile(src_type, addr=0x0000, size=1024)
+                dst = plm.make_tile(dst_type, addr=0x1000, size=1024)
+                plm.fillpad(dst, src)
+                return output
 
 
 def test_pto_codegen_dump_tile_dynamic_offset_lowering():

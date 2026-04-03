@@ -27,6 +27,25 @@ namespace pypto {
 
 namespace codegen {
 
+namespace {
+
+std::string ConvertTilePadToPTOValue(ir::TilePad pad) {
+  switch (pad) {
+    case ir::TilePad::null:
+      return "";
+    case ir::TilePad::zero:
+      return "PadValue::Zero";
+    case ir::TilePad::max:
+      return "PadValue::Max";
+    case ir::TilePad::min:
+      return "PadValue::Min";
+    default:
+      throw pypto::ValueError("Invalid TilePad value");
+  }
+}
+
+}  // namespace
+
 std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int64_t rows,
                                            int64_t cols) const {
   std::ostringstream type_alias;
@@ -37,6 +56,7 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
     std::string BLayout = "RowMajor";
     std::string SLayout = "NoneBox";
     std::string fractal = "512";
+    std::string pad_value;
     if (cols == 1) {
       BLayout = "ColMajor";
     }
@@ -45,6 +65,7 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
       BLayout = ConvertTileLayout(tv.blayout);
       SLayout = ConvertTileLayout(tv.slayout);
       fractal = std::to_string(tv.fractal);
+      pad_value = ConvertTilePadToPTOValue(tv.pad);
       // Infer TileType from tile_view layout
       using TL = ir::TileLayout;
       if (tv.blayout == TL::col_major && tv.slayout == TL::row_major) tile_type_str = "TileType::Mat";
@@ -53,7 +74,11 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
     }
     type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows
                << ", " << cols << ", BLayout::" << BLayout << ", -1, -1, SLayout::" << SLayout << ", "
-               << fractal << ">";
+               << fractal;
+    if (!pad_value.empty()) {
+      type_alias << ", " << pad_value;
+    }
+    type_alias << ">";
     return type_alias.str();
   }
   ir::MemorySpace space = (*tile_type->memref_)->memory_space_;  // NOLINT(bugprone-unchecked-optional-access)
@@ -63,6 +88,7 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
   std::string BLayout = "RowMajor";
   std::string SLayout = "NoneBox";
   std::string fractal = "512";
+  std::string pad_value;
 
   if (cols == 1) {
     BLayout = "ColMajor";
@@ -71,10 +97,14 @@ std::string TypeConverter::ConvertTileType(const ir::TileTypePtr& tile_type, int
     BLayout = ConvertTileLayout(tv.blayout);
     SLayout = ConvertTileLayout(tv.slayout);
     fractal = std::to_string(tv.fractal);
+    pad_value = ConvertTilePadToPTOValue(tv.pad);
   }
   type_alias << "Tile<" << tile_type_str << ", " << tile_type->dtype_.ToCTypeString() << ", " << rows << ", "
-             << cols << ", BLayout::" << BLayout << ", -1, -1, SLayout::" << SLayout << ", " << fractal
-             << ">";
+             << cols << ", BLayout::" << BLayout << ", -1, -1, SLayout::" << SLayout << ", " << fractal;
+  if (!pad_value.empty()) {
+    type_alias << ", " << pad_value;
+  }
+  type_alias << ">";
 
   return type_alias.str();
 }
